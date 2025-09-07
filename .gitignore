@@ -1,0 +1,27 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo
+Cargo.lock
+# Remove Cargo.lock from gitignore if creating an executable/binary
+# Keep it in gitignore for libraries
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment files
+.env
+.env.local
+
+# Debug files
+*.log
+
+# OS files
+Thumbs.db
