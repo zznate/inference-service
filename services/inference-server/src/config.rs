@@ -20,7 +20,8 @@ pub struct ServerConfig {
 pub struct InferenceConfig {
     // Common fields all providers need
     pub base_url: String,
-    pub model: String,
+    pub default_model: String,
+    pub allowed_models: Option<Vec<String>>, // Optional list of allowed models
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     
@@ -95,6 +96,10 @@ pub enum RotationPolicy {
     Daily,
     Hourly,
     Size,
+}
+
+fn default_model() -> String {
+    "gpt-oss-20b".to_string()
 }
 
 fn default_host() -> String {

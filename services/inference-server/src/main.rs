@@ -1,6 +1,6 @@
 use axum::{extract::{State}, routing::{get, post}, Json, Router};
 use tokio::net::TcpListener;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tracing::{debug, info, instrument};
 
 mod telemetry;
@@ -12,9 +12,11 @@ use lm_client_studio::{call_lm_studio};
 
 mod error;
 mod config;
+mod models;
 use error::ErrorResponse;
 use config::Settings;
 use error::ApiError;
+use models::{CompletionRequest, CompletionResponse};
 
 // Hold the http client and lm studio base url
 #[derive(Clone)]
@@ -29,20 +31,7 @@ struct RootResponse {
     message: String,
 }
 
-#[derive(Deserialize, Debug)]
-struct CompletionRequest {
-    prompt: String,
-    max_tokens: Option<u32>,
-    temperature: Option<f32>,
-}
 
-#[derive(Serialize, Debug)]
-struct CompletionResponse {
-    provider: String,
-    text: String,
-    model: String,
-    tokens_used: Option<u32>,
-}
 
 #[tokio::main]
 async fn main() {
@@ -74,7 +63,10 @@ async fn main() {
     telemetry::shutdown_logging(logger_provider);
 }
 
-#[instrument(skip(state), fields(prompt_length = request.prompt.len()))]
+#[instrument(skip(state), fields(
+    prompt_length = request.prompt.len(),
+    model = request.model.as_deref().unwrap_or("default"),
+    ))]
 async fn generate_completion(
     State(state): State<AppState>,
     Json(request): Json<CompletionRequest>,
@@ -84,19 +76,26 @@ async fn generate_completion(
 
     validate_completion_request(&request)?;
 
+    let model = request.model
+    .as_deref()
+    .unwrap_or(&state.settings.inference.default_model);
+
+    debug!("Using model: {}", model);
+
     let lm_response = call_lm_studio(
         &state.http_client,
         &state.settings.inference.base_url,
         &request.prompt,
         request.max_tokens,
         request.temperature,
-        &state.settings.inference.model,
+        model,
     )
     .await?;
 
     info!(
-        model = &state.settings.inference.model,
+        model = model,
         response_length = lm_response.text.len(),
+        lm_response = lm_response.text,
         total_tokens = ?lm_response.total_tokens,
         prompt_tokens = ?lm_response.prompt_tokens,
         completion_tokens = ?lm_response.completion_tokens,
@@ -106,7 +105,7 @@ async fn generate_completion(
     Ok(Json(CompletionResponse {
         provider: state.settings.inference.provider_name().to_string(),
         text: lm_response.text,
-        model: state.settings.inference.model.clone(), // note: this compiles without clone on 1.88
+        model: model.to_string(),
         tokens_used: lm_response.total_tokens,
     }))
 }

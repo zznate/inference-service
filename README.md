@@ -14,3 +14,8 @@ A Rust-based inference server that interfaces with LM Studio for text generation
 2. Run the server:
    ```bash
    RUST_LOG=info cargo run
+   ```
+## ToDo
+- Add support for Triton Inference Server
+- Add support for OpenAI API
+- Mock responses for deterministic testing

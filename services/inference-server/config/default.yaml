@@ -5,7 +5,12 @@ server:
 inference:
   provider: lmstudio
   base_url: "http://localhost:1234/v1"
-  model: "gpt-oss-20b"
+  default_model: "gpt-oss-20b"
+  # Optional: specify allowed models 
+  # allowed_models:
+  #   - "gpt-oss-20b"
+  #   - "llama-2-7b"
+  #   - "mistral-7b"
   timeout_secs: 30
 
 logging:

@@ -1,12 +1,14 @@
 use axum::{http::StatusCode, response::IntoResponse, response::Response, Json};
-use crate::CompletionRequest;
 use crate::ErrorResponse;
+use crate::models::CompletionRequest;
+
 
 #[derive(Debug)]
 pub enum ValidationError {
     EmptyPrompt,
     InvalidMaxTokens(u32),
     InvalidTemperature(f32),
+    InvalidModel(String),
 }
 
 impl IntoResponse for ValidationError {
@@ -27,6 +29,11 @@ impl IntoResponse for ValidationError {
                 StatusCode::BAD_REQUEST,
                 "INVALID_TEMPERATURE",
                 format!("Temperature must be between 0.0 and 2.0, got {}", temperature),
+            ),
+            ValidationError::InvalidModel(m) => (
+                StatusCode::BAD_REQUEST,
+                "INVALID_MODEL",
+                format!("Model '{}' is not allowed or available", m),
             ),
         };   
     
@@ -70,6 +77,7 @@ mod tests {
             prompt: "".to_string(),
             max_tokens: Some(100),
             temperature: Some(0.7),
+            model: Some("gpt-oss-20b".to_string()),
         };
         
         let result = validate_completion_request(&request);
@@ -82,6 +90,7 @@ mod tests {
             prompt: "   \n  ".to_string(),
             max_tokens: Some(100),
             temperature: Some(0.7),
+            model: Some("gpt-oss-20b".to_string()),
         };
         
         let result = validate_completion_request(&request);
@@ -94,6 +103,7 @@ mod tests {
             prompt: "Valid prompt".to_string(),
             max_tokens: Some(0),
             temperature: Some(0.7),
+            model: Some("gpt-oss-20b".to_string()),
         };
         
         let result = validate_completion_request(&request);
@@ -106,6 +116,7 @@ mod tests {
             prompt: "Valid prompt".to_string(),
             max_tokens: Some(5000),
             temperature: Some(0.7),
+            model: Some("gpt-oss-20b".to_string()),
         };
         
         let result = validate_completion_request(&request);
@@ -118,6 +129,7 @@ mod tests {
             prompt: "Valid prompt".to_string(),
             max_tokens: Some(100),
             temperature: Some(-0.1),
+            model: Some("gpt-oss-20b".to_string()),
         };
         
         let result = validate_completion_request(&request);
@@ -130,6 +142,7 @@ mod tests {
             prompt: "Valid prompt".to_string(),
             max_tokens: Some(100),
             temperature: Some(2.1),
+            model: Some("gpt-oss-20b".to_string()),
         };
         
         let result = validate_completion_request(&request);
@@ -142,6 +155,7 @@ mod tests {
             prompt: "What is 2+2?".to_string(),
             max_tokens: Some(100),
             temperature: Some(0.7),
+            model: Some("gpt-oss-20b".to_string()),
         };
         
         let result = validate_completion_request(&request);
@@ -154,6 +168,7 @@ mod tests {
             prompt: "What is 2+2?".to_string(),
             max_tokens: None,
             temperature: None,
+            model: Some("gpt-oss-20b".to_string()),
         };
         
         let result = validate_completion_request(&request);
