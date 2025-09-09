@@ -1,0 +1,14 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+logging:
+  level: info
+  format: json
+  output: file
+  file:
+    directory: "./logs"  # Use local directory for testing (or fix the typo)
+    prefix: "inference-server"
+    max_file_size_mb: 100
+    max_files: 10
+    rotation_policy: daily

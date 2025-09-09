@@ -1,0 +1,15 @@
+server:
+  host: "0.0.0.0"
+  port: 3000
+
+inference:
+  provider: lmstudio
+  lm_studio:
+    base_url: "http://localhost:1234/v1"
+    model: "gpt-oss-20b"
+    timeout_secs: 30
+
+logging:
+  level: info
+  format: pretty
+  output: stdout
