@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::collections::HashSet;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Settings {
@@ -20,8 +21,10 @@ pub struct ServerConfig {
 pub struct InferenceConfig {
     // Common fields all providers need
     pub base_url: String,
+    #[serde(default = "default_model")]
     pub default_model: String,
-    pub allowed_models: Option<Vec<String>>, // Optional list of allowed models
+    #[serde(default)]
+    pub allowed_models: Option<HashSet<String>>, // Optional list of allowed models
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     

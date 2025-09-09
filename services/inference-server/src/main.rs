@@ -5,7 +5,7 @@ use tracing::{debug, info, instrument};
 
 mod telemetry;
 mod validations;
-use validations::{validate_completion_request};
+use validations::{validate_completion_request, determine_model, validate_model_allowed};
 
 mod lm_client_studio;
 use lm_client_studio::{call_lm_studio};
@@ -66,19 +66,21 @@ async fn main() {
 #[instrument(skip(state), fields(
     prompt_length = request.prompt.len(),
     model = request.model.as_deref().unwrap_or("default"),
-    ))]
+))]
 async fn generate_completion(
     State(state): State<AppState>,
     Json(request): Json<CompletionRequest>,
 )   -> Result<Json<CompletionResponse>, ApiError> {
 
-    debug!("Prompt: {}", request.prompt);
-
     validate_completion_request(&request)?;
+    
+    let model = determine_model(
+        request.model.as_deref(),
+        &state.settings.inference.default_model,
+        state.settings.inference.allowed_models.as_ref(),
+    )?;
 
-    let model = request.model
-    .as_deref()
-    .unwrap_or(&state.settings.inference.default_model);
+    validate_model_allowed(model, state.settings.inference.allowed_models.as_ref())?;
 
     debug!("Using model: {}", model);
 

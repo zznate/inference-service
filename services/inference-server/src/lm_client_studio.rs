@@ -10,6 +10,7 @@ pub enum LMStudioError {
     RequestFailed(String),
     InvalidResponse(String),
     ServerError(StatusCode),
+    ModelMismatch { requested: String, actual: String },
 }
 
 impl IntoResponse for LMStudioError {
@@ -29,6 +30,11 @@ impl IntoResponse for LMStudioError {
                 code,
                 "LM_STUDIO_SERVER_ERROR",
                 format!("LM Studio returned error status: {}", code.as_u16()),
+            ),
+            LMStudioError::ModelMismatch { requested, actual } => (
+                StatusCode::BAD_REQUEST,  // 400 - client error!
+                "MODEL_NOT_FOUND",
+                format!("Model '{}' not available (LM Studio used '{}' instead)", requested, actual),
             ),
         };
         
@@ -117,6 +123,19 @@ pub async fn call_lm_studio(
         .as_u64()
         .map(|t| t as u32);
     
+    let actual_model = lm_response["model"].as_str();
+    if let Some(actual) = actual_model {
+        if actual != model {
+            error!(
+                "LM Studio used different model: requested '{}', got '{}'", 
+                model, actual
+            );
+            return Err(LMStudioError::ModelMismatch {
+                requested: model.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+    }
     Ok(LMStudioResponse {
         text,
         total_tokens,
