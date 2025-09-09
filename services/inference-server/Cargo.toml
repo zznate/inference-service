@@ -14,4 +14,6 @@ opentelemetry_sdk = { version = "0.30", features = ["rt-tokio", "logs"] }
 opentelemetry-stdout = { version = "0.30", features = ["logs"] }
 opentelemetry-appender-tracing = "0.30"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2"
+config = "0.15"

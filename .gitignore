@@ -3,6 +3,11 @@
 **/*.rs.bk
 *.pdb
 
+# Log files and directories
+logs/
+*.log
+*.log.*
+
 # Cargo
 Cargo.lock
 # Remove Cargo.lock from gitignore if creating an executable/binary
