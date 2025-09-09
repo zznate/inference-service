@@ -18,36 +18,34 @@ pub struct ServerConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct InferenceConfig {
-    #[serde(default = "default_provider")]
-    pub provider: InferenceProvider,
-    pub lm_studio: Option<LMStudioConfig>,
-    pub triton: Option<TritonConfig>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "lowercase")]
-pub enum InferenceProvider {
-    LMStudio,
-    Triton,
-    OpenAI,
-}
- 
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct LMStudioConfig {
-    #[serde(default = "default_lm_studio_url")]
+    // Common fields all providers need
     pub base_url: String,
-    #[serde(default = "default_model")]
     pub model: String,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    
+    // Provider-specific configuration
+    #[serde(flatten)]
+    pub provider: InferenceProvider,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct TritonConfig {
-    pub base_url: String,
-    pub model_name: String,
-    pub model_version: String,
+#[serde(tag = "provider", rename_all = "lowercase")]
+pub enum InferenceProvider {
+    #[serde(rename = "lmstudio")]
+    LMStudio,  // No extra fields needed
+    
+    #[serde(rename = "triton")]
+    Triton {
+        model_version: String,
+    },
+    
+    #[serde(rename = "openai")]
+    OpenAI {
+        api_key: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        organization_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -107,18 +105,6 @@ fn default_port() -> u16 {
     3000
 }
 
-fn default_provider() -> InferenceProvider {
-    InferenceProvider::LMStudio
-}
-
-fn default_lm_studio_url() -> String {
-    "http://localhost:1234/v1".to_string()
-}
-
-fn default_model() -> String {
-    "gpt-oss-20b".to_string()
-}
-
 fn default_timeout_secs() -> u64 {
     60
 }
@@ -153,6 +139,20 @@ fn default_log_file_max_files() -> u32 {
 
 fn default_rotation_policy() -> RotationPolicy {
     RotationPolicy::Daily
+}
+
+impl InferenceConfig {
+    pub fn provider_name(&self) -> &str {
+        match &self.provider {
+            InferenceProvider::LMStudio => "lmstudio",
+            InferenceProvider::Triton { .. } => "triton",
+            InferenceProvider::OpenAI { .. } => "openai",
+        }
+    }
+    #[allow(dead_code)]
+    pub fn requires_auth(&self) -> bool {
+        matches!(self.provider, InferenceProvider::OpenAI { .. })
+    }
 }
 
 impl Settings {

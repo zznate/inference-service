@@ -38,6 +38,7 @@ struct CompletionRequest {
 
 #[derive(Serialize, Debug)]
 struct CompletionResponse {
+    provider: String,
     text: String,
     model: String,
     tokens_used: Option<u32>,
@@ -83,21 +84,18 @@ async fn generate_completion(
 
     validate_completion_request(&request)?;
 
-    let lm_config = state.settings.inference.lm_studio.as_ref()
-        .expect("LM Studio config not found");
-
     let lm_response = call_lm_studio(
         &state.http_client,
-        &lm_config.base_url,
+        &state.settings.inference.base_url,
         &request.prompt,
         request.max_tokens,
         request.temperature,
-        &lm_config.model,
+        &state.settings.inference.model,
     )
     .await?;
 
     info!(
-        model = &lm_config.model,
+        model = &state.settings.inference.model,
         response_length = lm_response.text.len(),
         total_tokens = ?lm_response.total_tokens,
         prompt_tokens = ?lm_response.prompt_tokens,
@@ -106,8 +104,9 @@ async fn generate_completion(
     );
 
     Ok(Json(CompletionResponse {
+        provider: state.settings.inference.provider_name().to_string(),
         text: lm_response.text,
-        model: "gpt-oss-20b".to_string(),
+        model: state.settings.inference.model.clone(), // note: this compiles without clone on 1.88
         tokens_used: lm_response.total_tokens,
     }))
 }
