@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::collections::HashSet;
+use std::time::Duration;
+
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Settings {
@@ -27,7 +29,8 @@ pub struct InferenceConfig {
     pub allowed_models: Option<HashSet<String>>, // Optional list of allowed models
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
-    
+    #[serde(default)]
+    pub http: Option<HttpConfigSchema>,
     // Provider-specific configuration
     #[serde(flatten)]
     pub provider: InferenceProvider,
@@ -101,6 +104,43 @@ pub enum RotationPolicy {
     Size,
 }
 
+/// Configuration as it appears in YAML/env
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct HttpConfigSchema {
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_retry_backoff_ms")]
+    pub retry_backoff_ms: u64,
+    #[serde(default)]
+    pub keep_alive_secs: Option<u64>,
+    #[serde(default)]
+    pub max_idle_connections: Option<usize>,
+}
+
+fn default_connect_timeout_secs() -> u64 {
+    30
+}
+
+fn default_max_retries() -> u32 {
+    3
+}
+
+fn default_retry_backoff_ms() -> u64 {
+    250
+}
+
+fn default_keep_alive_secs() -> Option<u64> {
+    Some(60)
+}
+
+fn default_max_idle_connections() -> Option<usize> {
+    Some(10)
+}
+
 fn default_model() -> String {
     "gpt-oss-20b".to_string()
 }
@@ -147,6 +187,21 @@ fn default_log_file_max_files() -> u32 {
 
 fn default_rotation_policy() -> RotationPolicy {
     RotationPolicy::Daily
+}
+
+
+impl HttpConfigSchema {
+    pub fn timeout(&self) -> Duration {
+        Duration::from_secs(self.timeout_secs)
+    }
+    
+    pub fn connect_timeout(&self) -> Duration {
+        Duration::from_secs(self.connect_timeout_secs)
+    }
+    
+    pub fn keep_alive(&self) -> Option<Duration> {
+        self.keep_alive_secs.map(Duration::from_secs)
+    }
 }
 
 impl InferenceConfig {
