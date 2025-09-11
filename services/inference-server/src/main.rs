@@ -1,18 +1,19 @@
+mod providers;  // Must be before config since config uses it
+mod telemetry;
+mod validations;
+mod error;
+mod config;
+mod models;
+
 use axum::{extract::{State}, routing::{get, post}, Json, Router};
 use tokio::net::TcpListener;
 use serde::Serialize;
 use tracing::{debug, info, instrument};
+use std::sync::Arc;
 
-mod telemetry;
-mod validations;
+use providers::InferenceProvider;
 use validations::{validate_completion_request, determine_model, validate_model_allowed};
 
-mod lm_client_studio;
-use lm_client_studio::{call_lm_studio};
-
-mod error;
-mod config;
-mod models;
 use error::ErrorResponse;
 use config::Settings;
 use error::ApiError;
@@ -21,7 +22,7 @@ use models::{CompletionRequest, CompletionResponse, Choice, Message, Usage};
 // Hold the http client and lm studio base url
 #[derive(Clone)]
 struct AppState {
-    http_client: reqwest::Client,
+    provider: Arc<dyn InferenceProvider>,
     settings: Settings,
 }
 
@@ -39,15 +40,17 @@ async fn main() {
 
     let logger_provider = telemetry::init_logging(&settings.logging);
 
+    let provider = create_provider(&settings).expect("Failed to create inference provider");
+
     let app_state = AppState {
-        http_client: reqwest::Client::new(),
+        provider: provider,
         settings: settings.clone(),
     };
 
     let app: Router = Router::new()
-    .route("/", get(root))
-    .route("/v1/chat/completions", post(generate_completion))
-    .with_state(app_state);
+        .route("/", get(root))
+        .route("/v1/chat/completions", post(generate_completion))
+        .with_state(app_state);
 
     let addr = format!("{}:{}", settings.server.host, settings.server.port);
     let listener = TcpListener::bind(&addr)
@@ -62,6 +65,40 @@ async fn main() {
 
     telemetry::shutdown_logging(logger_provider);
 }
+
+// Factory function to create the right provider
+fn create_provider(settings: &Settings) -> Result<Arc<dyn InferenceProvider>, Box<dyn std::error::Error>> {
+    use config::{InferenceProvider as ConfigProvider, HttpConfigSchema};
+    use providers::lmstudio::LMStudioProvider;
+    
+    // Get HTTP config - either from the new http field or fall back to timeout_secs
+    let http_config = match &settings.inference.http {
+        Some(http_schema) => http_schema.clone(),
+        None => {
+            // Fallback to old timeout_secs for backward compatibility
+            HttpConfigSchema {
+                timeout_secs: settings.inference.timeout_secs,
+                ..Default::default()
+            }
+        }
+    };
+    
+    match &settings.inference.provider {
+        ConfigProvider::LMStudio => {
+            Ok(Arc::new(LMStudioProvider::new(
+                settings.inference.base_url.clone(),
+                http_config,
+            ).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?))
+        },
+        ConfigProvider::Triton { .. } => {
+            Err("Triton provider not yet implemented".into())
+        },
+        ConfigProvider::OpenAI { .. } => {
+            Err("OpenAI provider not yet implemented".into())
+        },
+    }
+}
+
 
 #[instrument(skip(state), fields(
     message_count = request.messages.len(),
@@ -84,23 +121,23 @@ async fn generate_completion(
 
     debug!("Using model: {}", model);
 
-    let lm_response = call_lm_studio(
-        &state.http_client,
-        &state.settings.inference.base_url,
-        &request.messages,
-        request.max_tokens,
-        request.temperature,
-        model,
-    )
-    .await?;
+    let response = state.provider
+        .generate(
+            &request.messages,
+            model,
+            request.max_tokens,
+            request.temperature,
+        )
+        .await
+        .map_err(|e| ApiError::Provider(e))?;
 
     info!(
         model = model,
-        response_length = lm_response.text.len(),
-        lm_response = lm_response.text,
-        total_tokens = ?lm_response.total_tokens,
-        prompt_tokens = ?lm_response.prompt_tokens,
-        completion_tokens = ?lm_response.completion_tokens,
+        response_length = response.text.len(),
+        response_text = response.text,
+        total_tokens = ?response.total_tokens,
+        prompt_tokens = ?response.prompt_tokens,
+        completion_tokens = ?response.completion_tokens,
         "Completion successful"
     );
 
@@ -116,21 +153,23 @@ async fn generate_completion(
             index: 0,
             message: Message {
                 role: "assistant".to_string(),
-                content: lm_response.text,
+                content: response.text,
             },
             finish_reason: "stop".to_string(),
         }],
         usage: Usage {
-            prompt_tokens: lm_response.prompt_tokens.unwrap_or(0),
-            completion_tokens: lm_response.completion_tokens.unwrap_or(0),
-            total_tokens: lm_response.total_tokens.unwrap_or(0),
+            prompt_tokens: response.prompt_tokens.unwrap_or(0),
+            completion_tokens: response.completion_tokens.unwrap_or(0),
+            total_tokens: response.total_tokens.unwrap_or(0),
         },
     };
     
-    debug!("Sending OpenAI-formatted response: {:#?}", response);
+    
     
     Ok(Json(response))
 }
+
+// debug!("Sending OpenAI-formatted response: {:#?}", response);
 
 async fn root() -> Json<RootResponse> {
     Json(RootResponse {
