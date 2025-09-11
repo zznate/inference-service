@@ -3,10 +3,10 @@ use crate::ErrorResponse;
 use crate::models::CompletionRequest;
 use std::collections::HashSet;
 
-
 #[derive(Debug)]
 pub enum ValidationError {
-    EmptyPrompt,
+    EmptyMessages,
+    EmptyMessageContent,
     InvalidMaxTokens(u32),
     InvalidTemperature(f32),
     ModelNotInAllowedList { model: String , allowed: Vec<String> },
@@ -16,10 +16,15 @@ impl IntoResponse for ValidationError {
     fn into_response(self) -> Response {
 
         let (status, error_code, message) = match self { 
-            ValidationError::EmptyPrompt => (
+            ValidationError::EmptyMessages => (
                 StatusCode::BAD_REQUEST,
-                "EMPTY_PROMPT",
-                "Prompt cannot be empty".to_string(),
+                "EMPTY_MESSAGES",
+                "Messages array cannot be empty".to_string(),
+            ),
+            ValidationError::EmptyMessageContent => (
+                StatusCode::BAD_REQUEST,
+                "EMPTY_MESSAGE_CONTENT",
+                "Message content cannot be empty".to_string(),
             ),
             ValidationError::InvalidMaxTokens(max_tokens) => (
                 StatusCode::BAD_REQUEST,
@@ -52,8 +57,15 @@ impl IntoResponse for ValidationError {
 }
 
 pub fn validate_completion_request(request: &CompletionRequest) -> Result<(), ValidationError> {
-    if request.prompt.trim().is_empty() {
-        return Err(ValidationError::EmptyPrompt);
+    if request.messages.is_empty() {
+        return Err(ValidationError::EmptyMessages);
+    }
+    
+    // Check that all messages have non-empty content
+    for message in &request.messages {
+        if message.content.trim().is_empty() {
+            return Err(ValidationError::EmptyMessageContent);
+        }
     }
 
     if let Some(max_tokens) = request.max_tokens {
@@ -103,38 +115,61 @@ pub fn determine_model<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Message;
     use crate::CompletionRequest;  // Import from main
     
     #[test]
-    fn test_validate_empty_prompt() {
+    fn test_validate_empty_messages() {
         let request = CompletionRequest {
-            prompt: "".to_string(),
+            messages: vec![],
             max_tokens: Some(100),
             temperature: Some(0.7),
             model: Some("gpt-oss-20b".to_string()),
         };
         
         let result = validate_completion_request(&request);
-        assert!(matches!(result, Err(ValidationError::EmptyPrompt)));
+        assert!(matches!(result, Err(ValidationError::EmptyMessages)));
+    }
+
+    #[test]
+    fn test_validate_empty_message_content() {
+        let request = CompletionRequest {
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "".to_string(),
+            }],
+            max_tokens: Some(100),
+            temperature: Some(0.7),
+            model: Some("gpt-oss-20b".to_string()),
+        };
+        
+        let result = validate_completion_request(&request);
+        assert!(matches!(result, Err(ValidationError::EmptyMessageContent)));
     }
     
     #[test]
     fn test_validate_whitespace_prompt() {
         let request = CompletionRequest {
-            prompt: "   \n  ".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "   \n  ".to_string(),
+            }],
             max_tokens: Some(100),
             temperature: Some(0.7),
             model: Some("gpt-oss-20b".to_string()),
         };
         
         let result = validate_completion_request(&request);
-        assert!(matches!(result, Err(ValidationError::EmptyPrompt)));
+        assert!(matches!(result, Err(ValidationError::EmptyMessageContent)));
     }
     
     #[test]
     fn test_validate_invalid_max_tokens_zero() {
         let request = CompletionRequest {
-            prompt: "Valid prompt".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "Valid prompt".to_string(),
+            }],
             max_tokens: Some(0),
             temperature: Some(0.7),
             model: Some("gpt-oss-20b".to_string()),
@@ -147,7 +182,10 @@ mod tests {
     #[test]
     fn test_validate_invalid_max_tokens_too_high() {
         let request = CompletionRequest {
-            prompt: "Valid prompt".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "Valid prompt".to_string(),
+            }],
             max_tokens: Some(5000),
             temperature: Some(0.7),
             model: Some("gpt-oss-20b".to_string()),
@@ -160,7 +198,10 @@ mod tests {
     #[test]
     fn test_validate_invalid_temperature_too_low() {
         let request = CompletionRequest {
-            prompt: "Valid prompt".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "Valid prompt".to_string(),
+            }],
             max_tokens: Some(100),
             temperature: Some(-0.1),
             model: Some("gpt-oss-20b".to_string()),
@@ -173,7 +214,10 @@ mod tests {
     #[test]
     fn test_validate_invalid_temperature_too_high() {
         let request = CompletionRequest {
-            prompt: "Valid prompt".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "Valid prompt".to_string(),
+            }],
             max_tokens: Some(100),
             temperature: Some(2.1),
             model: Some("gpt-oss-20b".to_string()),
@@ -186,7 +230,10 @@ mod tests {
     #[test]
     fn test_validate_success_with_all_fields() {
         let request = CompletionRequest {
-            prompt: "What is 2+2?".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "What is 2+2?".to_string(),
+            }],
             max_tokens: Some(100),
             temperature: Some(0.7),
             model: Some("gpt-oss-20b".to_string()),
@@ -199,7 +246,10 @@ mod tests {
     #[test]
     fn test_validate_success_with_optional_fields() {
         let request = CompletionRequest {
-            prompt: "What is 2+2?".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "What is 2+2?".to_string(),
+            }],
             max_tokens: None,
             temperature: None,
             model: Some("gpt-oss-20b".to_string()),
