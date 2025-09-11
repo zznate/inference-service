@@ -4,6 +4,7 @@ use axum::{http::StatusCode, response::IntoResponse, response::Response, Json};
 use tracing::{debug, error};
 
 use crate::error::ErrorResponse;
+use crate::models::Message;
 
 #[derive(Debug)]
 pub enum LMStudioError {
@@ -57,7 +58,7 @@ pub struct LMStudioResponse {
 pub async fn call_lm_studio(
     client: &reqwest::Client,
     base_url: &str,
-    prompt: &str,
+    messages: &[Message],
     max_tokens: Option<u32>,
     temperature: Option<f32>,
     model: &str,
@@ -65,12 +66,7 @@ pub async fn call_lm_studio(
 
     let request_body = serde_json::json!({
         "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
+        "messages": messages,
         "max_tokens": max_tokens.unwrap_or(100),
         "temperature": temperature.unwrap_or(0.7),
     });

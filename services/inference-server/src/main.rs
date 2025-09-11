@@ -46,7 +46,7 @@ async fn main() {
 
     let app: Router = Router::new()
     .route("/", get(root))
-    .route("/completions", post(generate_completion))
+    .route("/v1/chat/completions", post(generate_completion))
     .with_state(app_state);
 
     let addr = format!("{}:{}", settings.server.host, settings.server.port);
@@ -64,7 +64,7 @@ async fn main() {
 }
 
 #[instrument(skip(state), fields(
-    prompt_length = request.prompt.len(),
+    message_count = request.messages.len(),
     model = request.model.as_deref().unwrap_or("default"),
 ))]
 async fn generate_completion(
@@ -87,7 +87,7 @@ async fn generate_completion(
     let lm_response = call_lm_studio(
         &state.http_client,
         &state.settings.inference.base_url,
-        &request.prompt,
+        &request.messages,
         request.max_tokens,
         request.temperature,
         model,
