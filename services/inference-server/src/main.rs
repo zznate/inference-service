@@ -16,7 +16,7 @@ mod models;
 use error::ErrorResponse;
 use config::Settings;
 use error::ApiError;
-use models::{CompletionRequest, CompletionResponse};
+use models::{CompletionRequest, CompletionResponse, Choice, Message, Usage};
 
 // Hold the http client and lm studio base url
 #[derive(Clone)]
@@ -104,12 +104,32 @@ async fn generate_completion(
         "Completion successful"
     );
 
-    Ok(Json(CompletionResponse {
-        provider: state.settings.inference.provider_name().to_string(),
-        text: lm_response.text,
+    let response = CompletionResponse {
+        id: format!("chatcmpl-{}", uuid::Uuid::now_v7()),
+        object: "chat.completion".to_string(),
+        created: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
         model: model.to_string(),
-        tokens_used: lm_response.total_tokens,
-    }))
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: "assistant".to_string(),
+                content: lm_response.text,
+            },
+            finish_reason: "stop".to_string(),
+        }],
+        usage: Usage {
+            prompt_tokens: lm_response.prompt_tokens.unwrap_or(0),
+            completion_tokens: lm_response.completion_tokens.unwrap_or(0),
+            total_tokens: lm_response.total_tokens.unwrap_or(0),
+        },
+    };
+    
+    debug!("Sending OpenAI-formatted response: {:#?}", response);
+    
+    Ok(Json(response))
 }
 
 async fn root() -> Json<RootResponse> {

@@ -16,8 +16,24 @@ pub struct CompletionRequest {
 
 #[derive(Serialize, Debug)]
 pub struct CompletionResponse {
-    pub text: String,
+    pub id: String,
+    pub object: String,
+    pub created: u64,
     pub model: String,
-    pub tokens_used: Option<u32>,
-    pub provider: String,
+    pub choices: Vec<Choice>,
+    pub usage: Usage,
+}
+
+#[derive(Serialize, Debug)]
+pub struct Choice {
+    pub index: u32,
+    pub message: Message,
+    pub finish_reason: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
 }
