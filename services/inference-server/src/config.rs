@@ -150,6 +150,8 @@ fn default_rotation_policy() -> RotationPolicy {
 }
 
 impl InferenceConfig {
+    // pick back up when we add providers
+    #[allow(dead_code)]
     pub fn provider_name(&self) -> &str {
         match &self.provider {
             InferenceProvider::LMStudio => "lmstudio",

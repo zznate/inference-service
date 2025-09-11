@@ -17,3 +17,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
 config = "0.15"
+uuid = { version = "1.2.0", features = ["v7"] }
