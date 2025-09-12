@@ -19,7 +19,7 @@ use config::Settings;
 use error::ApiError;
 use models::{CompletionRequest, CompletionResponse, Choice, Message, Usage};
 
-// Hold the http client and lm studio base url
+// Hold the http client and provider settings
 #[derive(Clone)]
 struct AppState {
     provider: Arc<dyn InferenceProvider>,
@@ -164,12 +164,10 @@ async fn generate_completion(
         },
     };
     
-    
+    debug!("Sending OpenAI-formatted response: {:#?}", response);
     
     Ok(Json(response))
 }
-
-// debug!("Sending OpenAI-formatted response: {:#?}", response);
 
 async fn root() -> Json<RootResponse> {
     Json(RootResponse {

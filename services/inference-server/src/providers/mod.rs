@@ -7,6 +7,8 @@ use crate::models::Message;
 pub mod lmstudio;
 
 /// Response from any inference provider
+/// Returned internally for the InferenceProvider to manage
+/// This is converted into a CompletionResponse in main for the API 
 #[derive(Debug, Serialize)]
 pub struct InferenceResponse {
     pub text: String,

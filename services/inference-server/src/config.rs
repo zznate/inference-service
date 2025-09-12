@@ -115,9 +115,9 @@ pub struct HttpConfigSchema {
     pub max_retries: u32,
     #[serde(default = "default_retry_backoff_ms")]
     pub retry_backoff_ms: u64,
-    #[serde(default)]
+    #[serde(default = "default_keep_alive_secs")]
     pub keep_alive_secs: Option<u64>,
-    #[serde(default)]
+    #[serde(default = "default_max_idle_connections")]
     pub max_idle_connections: Option<usize>,
 }
 
