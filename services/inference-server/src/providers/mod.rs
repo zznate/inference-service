@@ -2,10 +2,17 @@ use async_trait::async_trait;
 use serde::Serialize;
 use std::fmt;
 use crate::config::HttpConfigSchema;
-use crate::models::Message;
+use crate::models::{Message, CompletionRequest, CompletionResponse, Choice, Usage};
 
 pub mod lmstudio;
 
+#[derive(Debug, Clone)]
+pub struct InferenceRequest {
+    pub messages: Vec<Message>,
+    pub model: String,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+}
 /// Response from any inference provider
 /// Returned internally for the InferenceProvider to manage
 /// This is converted into a CompletionResponse in main for the API 
@@ -16,6 +23,7 @@ pub struct InferenceResponse {
     pub total_tokens: Option<u32>,
     pub prompt_tokens: Option<u32>,
     pub completion_tokens: Option<u32>,
+    pub finish_reason: Option<String>,
 }
 
 /// Error types that providers can return
@@ -51,20 +59,43 @@ impl std::error::Error for ProviderError {}
 /// Common trait that all inference providers must implement
 #[async_trait]
 pub trait InferenceProvider: Send + Sync {
-    /// Generate a completion for the given messages
+    /// Transform OpenAI-format request to our internal normalized format
+    fn build_inference_request(
+        &self,
+        request: &CompletionRequest,
+        model: &str,  // Model already determined by validation layer
+    ) -> Result<InferenceRequest, ProviderError>;
+    
+    /// Execute the inference request against the provider
+    /// Each provider implements their specific protocol here (HTTP, gRPC, etc.)
+    async fn execute(
+        &self,
+        request: &InferenceRequest,
+    ) -> Result<InferenceResponse, ProviderError>;
+    
+    /// Transform our internal response format to OpenAI-compatible format
+    fn build_completion_response(
+        &self,
+        response: &InferenceResponse,
+        original_request: &CompletionRequest,
+    ) -> CompletionResponse;
+    
+    /// High-level method that orchestrates the full flow
+    /// Most providers can use this default implementation
     async fn generate(
         &self,
-        messages: &[Message],
+        request: &CompletionRequest,
         model: &str,
-        max_tokens: Option<u32>,
-        temperature: Option<f32>,
-    ) -> Result<InferenceResponse, ProviderError>;
+    ) -> Result<CompletionResponse, ProviderError> {
+        let inference_req = self.build_inference_request(request, model)?;
+        let inference_resp = self.execute(&inference_req).await?;
+        Ok(self.build_completion_response(&inference_resp, request))
+    }
     
     /// Get the name of this provider (for logging/metrics)
     fn name(&self) -> &str;
 
     /// Get HTTP configuration if this provider uses HTTP
-    /// Returns None for local providers (e.g., Triton)
     fn http_config(&self) -> Option<&HttpConfigSchema> {
         None
     }
@@ -77,5 +108,38 @@ pub trait InferenceProvider: Send + Sync {
     /// Optional: Check if the provider is healthy/reachable
     async fn health_check(&self) -> Result<(), ProviderError> {
         Ok(())
+    }
+}
+
+/// Standard implementation for building CompletionResponse from InferenceResponse
+/// This can be used by most providers as-is
+pub fn standard_completion_response(
+    response: &InferenceResponse,
+    original_request: &CompletionRequest,
+) -> CompletionResponse {
+    CompletionResponse {
+        id: format!("chatcmpl-{}", uuid::Uuid::now_v7()),
+        object: "chat.completion".to_string(),
+        created: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        model: response.model_used.clone(),
+        choices: vec![Choice {
+            index: 0,
+            message: Message {
+                role: "assistant".to_string(),
+                content: response.text.clone(),
+            },
+            finish_reason: response.finish_reason
+                .as_deref()
+                .unwrap_or("stop")
+                .to_string(),
+        }],
+        usage: Usage {
+            prompt_tokens: response.prompt_tokens.unwrap_or(0),
+            completion_tokens: response.completion_tokens.unwrap_or(0),
+            total_tokens: response.total_tokens.unwrap_or(0),
+        },
     }
 }
