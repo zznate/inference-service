@@ -17,6 +17,7 @@ use validations::{validate_completion_request, determine_model, validate_model_a
 use config::Settings;
 use error::ApiError;
 use models::{CompletionRequest, CompletionResponse};
+use providers::mock::MockProvider;
 
 // Hold the http client and provider settings
 #[derive(Clone)]
@@ -87,6 +88,11 @@ fn create_provider(settings: &Settings) -> Result<Arc<dyn InferenceProvider>, Bo
             Ok(Arc::new(LMStudioProvider::new(
                 settings.inference.base_url.clone(),
                 http_config,
+            ).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?))
+        },
+        ConfigProvider::Mock { responses_dir } => {
+            Ok(Arc::new(MockProvider::new(
+                responses_dir.clone(),
             ).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?))
         },
         ConfigProvider::Triton { .. } => {

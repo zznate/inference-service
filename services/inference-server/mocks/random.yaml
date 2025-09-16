@@ -1,0 +1,27 @@
+responses:
+  - text: "Random response A: The sky is blue."
+    model_used: "mock-random"
+    prompt_tokens: 10
+    completion_tokens: 8
+    total_tokens: 18
+    
+  - text: "Random response B: Water is essential for life."
+    model_used: "mock-random"
+    prompt_tokens: 10
+    completion_tokens: 9
+    total_tokens: 19
+    
+  - text: "Random response C: Mathematics is the language of the universe."
+    model_used: "mock-random"
+    prompt_tokens: 10
+    completion_tokens: 11
+    total_tokens: 21
+    
+  - text: "Random response D: Music soothes the soul."
+    model_used: "mock-random"
+    prompt_tokens: 10
+    completion_tokens: 7
+    total_tokens: 17
+
+settings:
+  mode: random  # Randomly select from available responses

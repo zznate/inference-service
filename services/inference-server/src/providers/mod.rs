@@ -6,6 +6,8 @@ use crate::models::{Message, CompletionRequest, CompletionResponse, Choice, Usag
 use uuid::Uuid;
 
 pub mod lmstudio;
+pub mod mock;
+
 
 // ===== Internal Service Models =====
 // These structs represent our normalized internal format that all providers work with

@@ -1,0 +1,14 @@
+responses:
+  - text: |
+      The capital of France is Paris. Paris is not only the capital but also the largest city in France, 
+      known for its art, fashion, gastronomy, and culture. The city is home to many landmarks including 
+      the Eiffel Tower, the Louvre Museum, and Notre-Dame Cathedral.
+    model_used: "mock-integration"
+    prompt_tokens: 15
+    completion_tokens: 55
+    total_tokens: 70
+    finish_reason: "stop"
+    delay_ms: 100  # Simulate 100ms latency
+
+settings:
+  mode: first
