@@ -2,6 +2,14 @@
 
 The mock provider is an inference provider that returns mock responses for inference requests. It is used for testing and development purposes. The default configuration loads mock responses from the `mocks` directory. 
 
+This provider was designed with the following goals in mind:
+
+- No External Dependencies: Run tests without LM Studio, Ollama, etc or any external service
+- Deterministic Testing: Exact, repeatable responses for CI/CD
+- Load Testing: Test your application's handling of AI response delays
+- Development: Work on UI/integration without running expensive models
+- Multiple Scenarios: Different response patterns for different test cases (e.g. random, sequential, first)
+
 ## Configuration
 
 The mock responses can be configured in YAML files with the following format:
