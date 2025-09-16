@@ -1,0 +1,10 @@
+responses:
+  - text: "This is the default mock response. Your input has been received and processed."
+    model_used: "mock-default"
+    prompt_tokens: 10
+    completion_tokens: 12
+    total_tokens: 22
+    finish_reason: "stop"
+
+settings:
+  mode: first

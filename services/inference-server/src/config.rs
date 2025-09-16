@@ -53,6 +53,12 @@ pub enum InferenceProvider {
         #[serde(skip_serializing_if = "Option::is_none")]
         organization_id: Option<String>,
     },
+
+    #[serde(rename = "mock")]
+    Mock {
+        #[serde(default = "default_mock_responses_dir")]
+        responses_dir: PathBuf,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -157,6 +163,10 @@ fn default_timeout_secs() -> u64 {
     60
 }
 
+fn default_mock_responses_dir() -> PathBuf {
+    PathBuf::from("./mocks")
+}
+
 fn default_log_output() -> LogOutput {
     LogOutput::Stdout
 }
@@ -212,6 +222,7 @@ impl InferenceConfig {
             InferenceProvider::LMStudio => "lmstudio",
             InferenceProvider::Triton { .. } => "triton",
             InferenceProvider::OpenAI { .. } => "openai",
+            InferenceProvider::Mock { .. } => "mock",
         }
     }
     #[allow(dead_code)]
