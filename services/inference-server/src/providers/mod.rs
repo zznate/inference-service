@@ -3,27 +3,55 @@ use serde::Serialize;
 use std::fmt;
 use crate::config::HttpConfigSchema;
 use crate::models::{Message, CompletionRequest, CompletionResponse, Choice, Usage};
+use uuid::Uuid;
 
 pub mod lmstudio;
 
+// ===== Internal Service Models =====
+// These structs represent our normalized internal format that all providers work with
+
+/// Normalized request format that all providers understand
 #[derive(Debug, Clone)]
 pub struct InferenceRequest {
+    // Core fields that all providers need
     pub messages: Vec<Message>,
-    pub model: String,
+    pub model: String,  // Required internally (we apply defaults before this point)
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    
+    // Common optional parameters
+    pub top_p: Option<f32>,
+    pub frequency_penalty: Option<f32>,
+    pub presence_penalty: Option<f32>,
+    pub stop_sequences: Option<Vec<String>>,
+    pub seed: Option<u64>,
+    
+    // Extension point for provider-specific parameters
+    // This allows providers to pass through specific settings without
+    // modifying the core struct
+    pub provider_params: Option<serde_json::Value>,
 }
-/// Response from any inference provider
-/// Returned internally for the InferenceProvider to manage
-/// This is converted into a CompletionResponse in main for the API 
+
+/// Normalized response format that all providers return
 #[derive(Debug, Serialize)]
 pub struct InferenceResponse {
+    // Core response fields
     pub text: String,
     pub model_used: String,
+    pub finish_reason: Option<String>,
+    
+    // Token usage information
     pub total_tokens: Option<u32>,
     pub prompt_tokens: Option<u32>,
     pub completion_tokens: Option<u32>,
-    pub finish_reason: Option<String>,
+    
+    // Additional metadata
+    pub latency_ms: Option<u64>,
+    pub provider_request_id: Option<String>,
+    
+    // Extension point for provider-specific response data
+    // (e.g., Triton might return batch information, confidence scores, etc.)
+    pub provider_metadata: Option<serde_json::Value>,
 }
 
 /// Error types that providers can return
@@ -111,14 +139,16 @@ pub trait InferenceProvider: Send + Sync {
     }
 }
 
+// ===== Helper Functions =====
+
 /// Standard implementation for building CompletionResponse from InferenceResponse
 /// This can be used by most providers as-is
 pub fn standard_completion_response(
     response: &InferenceResponse,
-    original_request: &CompletionRequest,
+    _original_request: &CompletionRequest,
 ) -> CompletionResponse {
     CompletionResponse {
-        id: format!("chatcmpl-{}", uuid::Uuid::now_v7()),
+        id: format!("chatcmpl-{}", Uuid::now_v7()),
         object: "chat.completion".to_string(),
         created: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

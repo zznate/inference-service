@@ -14,10 +14,9 @@ use std::sync::Arc;
 use providers::InferenceProvider;
 use validations::{validate_completion_request, determine_model, validate_model_allowed};
 
-use error::ErrorResponse;
 use config::Settings;
 use error::ApiError;
-use models::{CompletionRequest, CompletionResponse, Choice, Message, Usage};
+use models::{CompletionRequest, CompletionResponse};
 
 // Hold the http client and provider settings
 #[derive(Clone)]
@@ -32,8 +31,6 @@ struct RootResponse {
     message: String,
 }
 
-
-
 #[tokio::main]
 async fn main() {
     let settings = Settings::new().expect("Failed to load configuration");
@@ -43,13 +40,15 @@ async fn main() {
     let provider = create_provider(&settings).expect("Failed to create inference provider");
 
     let app_state = AppState {
-        provider: provider,
+        provider,
         settings: settings.clone(),
     };
 
     let app: Router = Router::new()
         .route("/", get(root))
         .route("/v1/chat/completions", post(generate_completion))
+        .route("/v1/models", get(list_models))
+        .route("/health", get(health_check))
         .with_state(app_state);
 
     let addr = format!("{}:{}", settings.server.host, settings.server.port);
@@ -99,7 +98,6 @@ fn create_provider(settings: &Settings) -> Result<Arc<dyn InferenceProvider>, Bo
     }
 }
 
-
 #[instrument(skip(state), fields(
     message_count = request.messages.len(),
     model = request.model.as_deref().unwrap_or("default"),
@@ -107,66 +105,82 @@ fn create_provider(settings: &Settings) -> Result<Arc<dyn InferenceProvider>, Bo
 async fn generate_completion(
     State(state): State<AppState>,
     Json(request): Json<CompletionRequest>,
-)   -> Result<Json<CompletionResponse>, ApiError> {
+) -> Result<Json<CompletionResponse>, ApiError> {
 
+    // Validate the incoming request
     validate_completion_request(&request)?;
     
+    // Determine which model to use (applies defaults if needed)
     let model = determine_model(
         request.model.as_deref(),
         &state.settings.inference.default_model,
         state.settings.inference.allowed_models.as_ref(),
     )?;
 
+    // Validate the model is allowed (if restrictions are configured)
     validate_model_allowed(model, state.settings.inference.allowed_models.as_ref())?;
 
     debug!("Using model: {}", model);
 
+    // Use the new provider contract - it now returns CompletionResponse directly
     let response = state.provider
-        .generate(
-            &request.messages,
-            model,
-            request.max_tokens,
-            request.temperature,
-        )
+        .generate(&request, model)
         .await
         .map_err(|e| ApiError::Provider(e))?;
 
     info!(
         model = model,
-        response_length = response.text.len(),
-        response_text = response.text,
-        total_tokens = ?response.total_tokens,
-        prompt_tokens = ?response.prompt_tokens,
-        completion_tokens = ?response.completion_tokens,
+        choices_count = response.choices.len(),
+        total_tokens = response.usage.total_tokens,
+        prompt_tokens = response.usage.prompt_tokens,
+        completion_tokens = response.usage.completion_tokens,
         "Completion successful"
     );
-
-    let response = CompletionResponse {
-        id: format!("chatcmpl-{}", uuid::Uuid::now_v7()),
-        object: "chat.completion".to_string(),
-        created: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        model: model.to_string(),
-        choices: vec![Choice {
-            index: 0,
-            message: Message {
-                role: "assistant".to_string(),
-                content: response.text,
-            },
-            finish_reason: "stop".to_string(),
-        }],
-        usage: Usage {
-            prompt_tokens: response.prompt_tokens.unwrap_or(0),
-            completion_tokens: response.completion_tokens.unwrap_or(0),
-            total_tokens: response.total_tokens.unwrap_or(0),
-        },
-    };
-    
-    debug!("Sending OpenAI-formatted response: {:#?}", response);
     
     Ok(Json(response))
+}
+
+async fn list_models(
+    State(state): State<AppState>,
+) -> Result<Json<ModelsResponse>, ApiError> {
+    let models = state.provider
+        .list_models()
+        .await
+        .map_err(|e| ApiError::Provider(e))?;
+    
+    let model_list = models.into_iter().map(|id| ModelInfo {
+        id,
+        object: "model".to_string(),
+        owned_by: "local".to_string(),
+    }).collect();
+    
+    Ok(Json(ModelsResponse {
+        object: "list".to_string(),
+        data: model_list,
+    }))
+}
+
+async fn health_check(
+    State(state): State<AppState>,
+) -> Result<Json<HealthResponse>, ApiError> {
+    // Check if provider is healthy
+    state.provider
+        .health_check()
+        .await
+        .map_err(|e| ApiError::Provider(e))?;
+    
+    // Get HTTP config if available (for providers that use HTTP)
+    let http_config = state.provider.http_config().map(|config| HttpConfigInfo {
+        timeout_secs: config.timeout_secs,
+        connect_timeout_secs: config.connect_timeout_secs,
+        max_retries: config.max_retries,
+    });
+    
+    Ok(Json(HealthResponse {
+        status: "healthy".to_string(),
+        provider: state.provider.name().to_string(),
+        http_config,
+    }))
 }
 
 async fn root() -> Json<RootResponse> {
@@ -175,4 +189,30 @@ async fn root() -> Json<RootResponse> {
     })
 }
 
-    
+// Response types for the API endpoints
+#[derive(Serialize)]
+struct ModelsResponse {
+    object: String,
+    data: Vec<ModelInfo>,
+}
+
+#[derive(Serialize)]
+struct ModelInfo {
+    id: String,
+    object: String,
+    owned_by: String,
+}
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: String,
+    provider: String,
+    http_config: Option<HttpConfigInfo>,
+}
+
+#[derive(Serialize)]
+struct HttpConfigInfo {
+    timeout_secs: u64,
+    connect_timeout_secs: u64,
+    max_retries: u32,
+}
