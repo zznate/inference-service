@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Message {
     pub role: String,
     pub content: String,
@@ -14,7 +14,7 @@ pub struct CompletionRequest {
     pub temperature: Option<f32>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct CompletionResponse {
     pub id: String,
     pub object: String,
@@ -24,14 +24,14 @@ pub struct CompletionResponse {
     pub usage: Usage,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Choice {
     pub index: u32,
     pub message: Message,
     pub finish_reason: String,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,

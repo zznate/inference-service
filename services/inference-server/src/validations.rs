@@ -1,5 +1,5 @@
 use axum::{http::StatusCode, response::IntoResponse, response::Response, Json};
-use crate::ErrorResponse;
+use crate::error::ErrorResponse;
 use crate::models::CompletionRequest;
 use std::collections::HashSet;
 
