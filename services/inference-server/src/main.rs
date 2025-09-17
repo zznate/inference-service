@@ -67,56 +67,23 @@ async fn main() {
 
 // Factory function to create the right provider
 fn create_provider(settings: &Arc<Settings>) -> Result<Arc<dyn InferenceProvider>, Box<dyn std::error::Error>> {
-    use config::{InferenceProvider as ConfigProvider, HttpConfigSchema};
+    use config::{InferenceProvider as ConfigProvider};
     use providers::lmstudio::LMStudioProvider;
     use providers::mock::MockProvider;
     use providers::openai::OpenAIProvider;
     
     match &settings.inference.provider {
         ConfigProvider::LMStudio => {
-            // LM Studio requires base_url
-            let base_url = settings.inference.base_url.clone();
-            
-            // Get HTTP config - either from the new http field or fall back to timeout_secs
-            let http_config = match &settings.inference.http {
-                Some(http_schema) => http_schema.clone(),
-                None => {
-                    // Fallback to old timeout_secs for backward compatibility
-                    HttpConfigSchema {
-                        timeout_secs: settings.inference.timeout_secs,
-                        ..Default::default()
-                    }
-                }
-            };
-            
-            Ok(Arc::new(LMStudioProvider::new(
-                base_url,
-                http_config,
-            ).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?))
+            Ok(Arc::new(LMStudioProvider::new(settings.clone())
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?))
         },
-        ConfigProvider::Mock { responses_dir } => {
-            Ok(Arc::new(MockProvider::new(
-                responses_dir.clone(),
-            ).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?))
+        ConfigProvider::Mock { .. } => {
+            Ok(Arc::new(MockProvider::new(settings.clone())
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?))
         },
-        ConfigProvider::OpenAI { api_key, organization_id } => {
-            // Get HTTP config
-            let http_config = match &settings.inference.http {
-                Some(http_schema) => http_schema.clone(),
-                None => {
-                    HttpConfigSchema {
-                        timeout_secs: settings.inference.timeout_secs,
-                        ..Default::default()
-                    }
-                }
-            };
-            
-            Ok(Arc::new(OpenAIProvider::new(
-                api_key.clone(),
-                organization_id.clone(),
-                Some(settings.inference.base_url.clone()), // Optional, for Azure OpenAI or proxies
-                http_config,
-            ).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?))
+        ConfigProvider::OpenAI { .. } => {
+            Ok(Arc::new(OpenAIProvider::new(settings.clone())
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?))
         },
         ConfigProvider::Triton { .. } => {
             Err("Triton provider not yet implemented".into())

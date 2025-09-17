@@ -1,6 +1,7 @@
 use super::{InferenceProvider, InferenceRequest, InferenceResponse, ProviderError, standard_completion_response};
-use crate::config::HttpConfigSchema;
+use crate::config::{HttpConfigSchema, Settings};
 use crate::models::{CompletionRequest, CompletionResponse};
+use std::sync::Arc;
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json;
@@ -8,22 +9,25 @@ use tracing::{debug, error, instrument};
 
 pub struct OpenAIProvider {
     client: reqwest::Client,
-    base_url: String,
-    api_key: String,
-    organization_id: Option<String>,
-    http_config: HttpConfigSchema,
+    settings: Arc<Settings>,
 }
 
 impl OpenAIProvider {
-    pub fn new(
-        api_key: String,
-        organization_id: Option<String>,
-        base_url: Option<String>,
-        http_config: HttpConfigSchema,
-    ) -> Result<Self, ProviderError> {
+    pub fn new(settings: Arc<Settings>) -> Result<Self, ProviderError> {
+        let (api_key, organization_id) = match &settings.inference.provider {
+            crate::config::InferenceProvider::OpenAI { api_key, organization_id } => {
+                (api_key.clone(), organization_id.clone())
+            },
+            _ => return Err(ProviderError::Configuration("Invalid provider configuration for OpenAIProvider".to_string())),
+        };
+
+        // Get HTTP config
+        let http_config = settings.inference.http.as_ref()
+            .ok_or_else(|| ProviderError::Configuration("HTTP configuration required".to_string()))?;
+
         // Build headers with authentication
         let mut headers = HeaderMap::new();
-        
+
         // Add API key
         let auth_value = format!("Bearer {}", api_key);
         headers.insert(
@@ -31,7 +35,7 @@ impl OpenAIProvider {
             HeaderValue::from_str(&auth_value)
                 .map_err(|e| ProviderError::Configuration(format!("Invalid API key format: {}", e)))?
         );
-        
+
         // Add organization ID if provided
         if let Some(ref org_id) = organization_id {
             headers.insert(
@@ -40,10 +44,10 @@ impl OpenAIProvider {
                     .map_err(|e| ProviderError::Configuration(format!("Invalid organization ID: {}", e)))?
             );
         }
-        
+
         // Always set content type
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        
+
         // Build HTTP client with our config and headers
         let client = reqwest::Client::builder()
             .default_headers(headers)
@@ -53,21 +57,15 @@ impl OpenAIProvider {
             .pool_max_idle_per_host(http_config.max_idle_connections.unwrap_or(10))
             .build()
             .map_err(|e| ProviderError::Configuration(format!("Failed to build HTTP client: {}", e)))?;
-        
-        // Use official OpenAI API URL unless overridden (e.g., for Azure OpenAI)
-        let base_url = base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-        
-        info!("Initialized OpenAI provider with base URL: {}", base_url);
+
+        debug!("Initialized OpenAI provider with base URL: {}", settings.inference.base_url);
         if organization_id.is_some() {
-            info!("Using organization ID: {}", organization_id.as_ref().unwrap());
+            debug!("Using organization ID: {}", organization_id.as_ref().unwrap());
         }
-        
+
         Ok(Self {
             client,
-            base_url,
-            api_key,
-            organization_id,
-            http_config,
+            settings,
         })
     }
     
@@ -241,7 +239,7 @@ impl InferenceProvider for OpenAIProvider {
         
         // Execute HTTP request
         let response = self.client
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(format!("{}/chat/completions", self.settings.inference.base_url))
             .json(&request_body)
             .send()
             .await
@@ -297,13 +295,13 @@ impl InferenceProvider for OpenAIProvider {
     }
     
     fn http_config(&self) -> Option<&HttpConfigSchema> {
-        Some(&self.http_config)
+        self.settings.inference.http.as_ref()
     }
     
     async fn health_check(&self) -> Result<(), ProviderError> {
         // Try to list models as a health check
         let response = self.client
-            .get(format!("{}/models", self.base_url))
+            .get(format!("{}/models", self.settings.inference.base_url))
             .send()
             .await
             .map_err(|e| {
@@ -343,7 +341,7 @@ impl InferenceProvider for OpenAIProvider {
         }
         
         let response = self.client
-            .get(format!("{}/models", self.base_url))
+            .get(format!("{}/models", self.settings.inference.base_url))
             .send()
             .await
             .map_err(|e| ProviderError::ConnectionFailed(format!("Failed to list models: {}", e)))?;
@@ -374,16 +372,38 @@ impl InferenceProvider for OpenAIProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ServerConfig, LoggingConfig, InferenceConfig, LogFormat, LogOutput};
     use crate::models::Message;
+
+    fn create_test_settings() -> Arc<Settings> {
+        Arc::new(Settings {
+            server: ServerConfig {
+                host: "localhost".to_string(),
+                port: 3000,
+            },
+            inference: InferenceConfig {
+                base_url: "https://api.openai.com/v1".to_string(),
+                default_model: "gpt-3.5-turbo".to_string(),
+                allowed_models: None,
+                timeout_secs: 30,
+                http: Some(HttpConfigSchema::default()),
+                provider: crate::config::InferenceProvider::OpenAI {
+                    api_key: "test-key".to_string(),
+                    organization_id: None,
+                },
+            },
+            logging: LoggingConfig {
+                level: "info".to_string(),
+                format: LogFormat::Pretty,
+                output: LogOutput::Stdout,
+                file: None,
+            },
+        })
+    }
     
     #[test]
     fn test_build_request_body() {
-        let provider = OpenAIProvider::new(
-            "test-key".to_string(),
-            None,
-            None,
-            HttpConfigSchema::default(),
-        ).unwrap();
+        let provider = OpenAIProvider::new(create_test_settings()).unwrap();
         
         let request = InferenceRequest {
             messages: vec![Message {
@@ -405,9 +425,9 @@ mod tests {
         
         assert_eq!(body["model"], "gpt-3.5-turbo");
         assert_eq!(body["max_tokens"], 100);
-        assert_eq!(body["temperature"], 0.7);
-        assert_eq!(body["top_p"], 0.9);
-        assert_eq!(body["frequency_penalty"], 0.5);
+        assert!((body["temperature"].as_f64().unwrap() - 0.7).abs() < 0.001);
+        assert!((body["top_p"].as_f64().unwrap() - 0.9).abs() < 0.001);
+        assert!((body["frequency_penalty"].as_f64().unwrap() - 0.5).abs() < 0.001);
         assert_eq!(body["stop"], serde_json::json!(["STOP"]));
         assert_eq!(body["seed"], 42);
         assert_eq!(body["n"], 1);
@@ -416,12 +436,7 @@ mod tests {
     
     #[test]
     fn test_parse_error_response() {
-        let provider = OpenAIProvider::new(
-            "test-key".to_string(),
-            None,
-            None,
-            HttpConfigSchema::default(),
-        ).unwrap();
+        let provider = OpenAIProvider::new(create_test_settings()).unwrap();
         
         let error_response = serde_json::json!({
             "error": {
@@ -444,4 +459,3 @@ mod tests {
     }
 }
 
-use tracing::info;
