@@ -1,6 +1,7 @@
 use super::{InferenceProvider, InferenceRequest, InferenceResponse, ProviderError, standard_completion_response};
-use crate::config::HttpConfigSchema;
+use crate::config::{HttpConfigSchema, Settings};
 use crate::models::{CompletionRequest, CompletionResponse};
+use std::sync::Arc;
 use async_trait::async_trait;
 use reqwest;
 use serde_json;
@@ -9,13 +10,15 @@ use tracing::{debug, error, instrument};
 
 pub struct LMStudioProvider {
     client: reqwest::Client,
-    base_url: String,
-    http_config: HttpConfigSchema,
+    settings: Arc<Settings>,
 }
 
 impl LMStudioProvider {
-    pub fn new(base_url: String, http_config: HttpConfigSchema) -> Result<Self, ProviderError> {
+    pub fn new(settings: Arc<Settings>) -> Result<Self, ProviderError> {
         // Build HTTP client with our config
+        let http_config = settings.inference.http.as_ref()
+            .ok_or_else(|| ProviderError::Configuration("HTTP configuration required".to_string()))?;
+
         let client = reqwest::Client::builder()
             .timeout(http_config.timeout())
             .connect_timeout(http_config.connect_timeout())
@@ -23,11 +26,10 @@ impl LMStudioProvider {
             .pool_max_idle_per_host(http_config.max_idle_connections.unwrap_or(10))
             .build()
             .map_err(|e| ProviderError::Configuration(format!("Failed to build HTTP client: {}", e)))?;
-        
+
         Ok(Self {
             client,
-            base_url,
-            http_config,
+            settings,
         })
     }
     
@@ -156,7 +158,7 @@ impl InferenceProvider for LMStudioProvider {
         
         // Execute HTTP request
         let response = self.client
-            .post(format!("{}/v1/chat/completions", self.base_url))
+            .post(format!("{}/v1/chat/completions", self.settings.inference.base_url))
             .json(&request_body)
             .send()
             .await
@@ -214,13 +216,13 @@ impl InferenceProvider for LMStudioProvider {
     }
     
     fn http_config(&self) -> Option<&HttpConfigSchema> {
-        Some(&self.http_config)
+        self.settings.inference.http.as_ref()
     }
     
     async fn health_check(&self) -> Result<(), ProviderError> {
         // Try to get models list as a health check
         let response = self.client
-            .get(format!("{}/v1/models", self.base_url))
+            .get(format!("{}/v1/models", self.settings.inference.base_url))
             .send()
             .await
             .map_err(|e| {
@@ -258,7 +260,7 @@ impl InferenceProvider for LMStudioProvider {
         }
         
         let response = self.client
-            .get(format!("{}/v1/models", self.base_url))
+            .get(format!("{}/v1/models", self.settings.inference.base_url))
             .send()
             .await
             .map_err(|e| ProviderError::ConnectionFailed(format!("Failed to list models: {}", e)))?;
@@ -282,14 +284,35 @@ impl InferenceProvider for LMStudioProvider {
 #[cfg(test)]
 mod tests {
     use crate::models::Message;
+    use crate::config::{ServerConfig, LoggingConfig, InferenceConfig, LogFormat, LogOutput};
     use super::*;
+
+    fn create_test_settings() -> Arc<Settings> {
+        Arc::new(Settings {
+            server: ServerConfig {
+                host: "localhost".to_string(),
+                port: 3000,
+            },
+            inference: InferenceConfig {
+                base_url: "http://localhost:1234".to_string(),
+                default_model: "test-model".to_string(),
+                allowed_models: None,
+                timeout_secs: 30,
+                http: Some(HttpConfigSchema::default()),
+                provider: crate::config::InferenceProvider::LMStudio,
+            },
+            logging: LoggingConfig {
+                level: "info".to_string(),
+                format: LogFormat::Pretty,
+                output: LogOutput::Stdout,
+                file: None,
+            },
+        })
+    }
     
     #[test]
     fn test_build_inference_request() {
-        let provider = LMStudioProvider::new(
-            "http://localhost:1234".to_string(),
-            HttpConfigSchema::default(),
-        ).unwrap();
+        let provider = LMStudioProvider::new(create_test_settings()).unwrap();
         
         let completion_req = CompletionRequest {
             messages: vec![Message {
@@ -316,10 +339,7 @@ mod tests {
     
     #[test]
     fn test_parse_response_body() {
-        let provider = LMStudioProvider::new(
-            "http://localhost:1234".to_string(),
-            HttpConfigSchema::default(),
-        ).unwrap();
+        let provider = LMStudioProvider::new(create_test_settings()).unwrap();
         
         // Create a response in OpenAI format (what LM Studio returns)
         let response_json = serde_json::json!({
@@ -356,10 +376,7 @@ mod tests {
     
     #[test]
     fn test_parse_response_wrong_model() {
-        let provider = LMStudioProvider::new(
-            "http://localhost:1234".to_string(),
-            HttpConfigSchema::default(),
-        ).unwrap();
+        let provider = LMStudioProvider::new(create_test_settings()).unwrap();
         
         let response_json = serde_json::json!({
             "id": "test-123",
@@ -395,10 +412,7 @@ mod tests {
     
     #[test]
     fn test_build_completion_response() {
-        let provider = LMStudioProvider::new(
-            "http://localhost:1234".to_string(),
-            HttpConfigSchema::default(),
-        ).unwrap();
+        let provider = LMStudioProvider::new(create_test_settings()).unwrap();
         
         let inference_resp = InferenceResponse {
             text: "Hello!".to_string(),

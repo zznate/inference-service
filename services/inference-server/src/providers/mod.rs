@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 pub mod lmstudio;
 pub mod mock;
+pub mod openai;
 
 
 // ===== Internal Service Models =====

@@ -1,4 +1,5 @@
 use super::{InferenceProvider, InferenceRequest, InferenceResponse, ProviderError, standard_completion_response};
+use crate::config::Settings;
 use crate::models::{CompletionRequest, CompletionResponse};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,7 @@ use uuid::Uuid;
 
 /// Mock provider for deterministic testing
 pub struct MockProvider {
-    responses_dir: PathBuf,
+    settings: Arc<Settings>,
     // Cache loaded responses to avoid repeated file I/O
     response_cache: Arc<Mutex<HashMap<String, MockResponseFile>>>,
 }
@@ -78,28 +79,41 @@ impl Default for MockSettings {
 }
 
 impl MockProvider {
-    pub fn new(responses_dir: PathBuf) -> Result<Self, ProviderError> {
+    pub fn new(settings: Arc<Settings>) -> Result<Self, ProviderError> {
+        let responses_dir = match &settings.inference.provider {
+            crate::config::InferenceProvider::Mock { responses_dir } => responses_dir,
+            _ => return Err(ProviderError::Configuration("Invalid provider configuration for MockProvider".to_string())),
+        };
+
         // Verify directory exists
         if !responses_dir.exists() {
             return Err(ProviderError::Configuration(
                 format!("Mock responses directory does not exist: {:?}", responses_dir)
             ));
         }
-        
+
         if !responses_dir.is_dir() {
             return Err(ProviderError::Configuration(
                 format!("Mock responses path is not a directory: {:?}", responses_dir)
             ));
         }
-        
+
         info!("Initialized mock provider with responses from: {:?}", responses_dir);
-        
+
         Ok(Self {
-            responses_dir,
+            settings,
             response_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
-    
+
+    /// Get responses directory from settings
+    fn responses_dir(&self) -> &PathBuf {
+        match &self.settings.inference.provider {
+            crate::config::InferenceProvider::Mock { responses_dir } => responses_dir,
+            _ => panic!("MockProvider misconfigured"), // This should never happen given constructor validation
+        }
+    }
+
     /// Extract scenario name from model name (strip "mock-" prefix)
     fn extract_scenario(&self, model: &str) -> Result<String, ProviderError> {
         if !model.starts_with("mock-") {
@@ -123,11 +137,11 @@ impl MockProvider {
         }
         
         // Try to load from file
-        let file_path = self.responses_dir.join(format!("{}.yaml", scenario));
+        let file_path = self.responses_dir().join(format!("{}.yaml", scenario));
         
         if !file_path.exists() {
             // Try default.yaml as fallback
-            let default_path = self.responses_dir.join("default.yaml");
+            let default_path = self.responses_dir().join("default.yaml");
             if default_path.exists() {
                 warn!("Scenario '{}' not found, using default.yaml", scenario);
                 return self.load_file(&default_path, "default");
@@ -271,9 +285,9 @@ impl InferenceProvider for MockProvider {
     
     async fn health_check(&self) -> Result<(), ProviderError> {
         // Check that we can access the responses directory
-        if !self.responses_dir.exists() {
+        if !self.responses_dir().exists() {
             return Err(ProviderError::Configuration(
-                format!("Mock responses directory no longer exists: {:?}", self.responses_dir)
+                format!("Mock responses directory no longer exists: {:?}", self.responses_dir())
             ));
         }
         Ok(())
@@ -283,7 +297,7 @@ impl InferenceProvider for MockProvider {
         // List all available mock scenarios
         let mut models = Vec::new();
         
-        let entries = std::fs::read_dir(&self.responses_dir)
+        let entries = std::fs::read_dir(&self.responses_dir())
             .map_err(|e| ProviderError::Configuration(
                 format!("Failed to read mock responses directory: {}", e)
             ))?;
@@ -309,13 +323,37 @@ impl InferenceProvider for MockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ServerConfig, LoggingConfig, InferenceConfig, HttpConfigSchema, LogFormat, LogOutput};
     use tempfile::TempDir;
     use std::fs;
+
+    fn create_test_settings(responses_dir: PathBuf) -> Arc<Settings> {
+        Arc::new(Settings {
+            server: ServerConfig {
+                host: "localhost".to_string(),
+                port: 3000,
+            },
+            inference: InferenceConfig {
+                base_url: "http://localhost:1234".to_string(),
+                default_model: "test-model".to_string(),
+                allowed_models: None,
+                timeout_secs: 30,
+                http: Some(HttpConfigSchema::default()),
+                provider: crate::config::InferenceProvider::Mock { responses_dir },
+            },
+            logging: LoggingConfig {
+                level: "info".to_string(),
+                format: LogFormat::Pretty,
+                output: LogOutput::Stdout,
+                file: None,
+            },
+        })
+    }
     
     #[test]
     fn test_extract_scenario() {
         let temp_dir = TempDir::new().unwrap();
-        let provider = MockProvider::new(temp_dir.path().to_path_buf()).unwrap();
+        let provider = MockProvider::new(create_test_settings(temp_dir.path().to_path_buf())).unwrap();
         
         assert_eq!(provider.extract_scenario("mock-test").unwrap(), "test");
         assert_eq!(provider.extract_scenario("mock-integration").unwrap(), "integration");
@@ -341,7 +379,7 @@ settings:
         let file_path = temp_dir.path().join("test.yaml");
         fs::write(&file_path, yaml_content).unwrap();
         
-        let provider = MockProvider::new(temp_dir.path().to_path_buf()).unwrap();
+        let provider = MockProvider::new(create_test_settings(temp_dir.path().to_path_buf())).unwrap();
         let response_file = provider.load_responses("test").unwrap();
         
         assert_eq!(response_file.responses.len(), 1);
