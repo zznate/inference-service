@@ -21,9 +21,20 @@ impl OpenAIProvider {
             _ => return Err(ProviderError::Configuration("Invalid provider configuration for OpenAIProvider".to_string())),
         };
 
-        // Get HTTP config
+        // Get HTTP config (use defaults if not provided)
         let http_config = settings.inference.http.as_ref()
-            .ok_or_else(|| ProviderError::Configuration("HTTP configuration required".to_string()))?;
+            .cloned()
+            .unwrap_or_else(|| {
+                // Provide sane defaults for development/testing
+                HttpConfigSchema {
+                    timeout_secs: 30,
+                    connect_timeout_secs: 10,
+                    max_retries: 3,
+                    retry_backoff_ms: 100,
+                    keep_alive_secs: Some(30),
+                    max_idle_connections: Some(10),
+                }
+            });
 
         // Build headers with authentication
         let mut headers = HeaderMap::new();
@@ -133,15 +144,21 @@ impl OpenAIProvider {
                 .ok_or_else(|| ProviderError::InvalidResponse("No choices in response".to_string()))?;
             
             return Ok(InferenceResponse {
-                text: choice.message.content,
+                text: choice.message.as_ref()
+                    .and_then(|m| m.content.as_ref())
+                    .map(|c| c.clone())
+                    .unwrap_or_else(|| "".to_string()),
                 model_used: completion_response.model,
-                total_tokens: Some(completion_response.usage.total_tokens),
-                prompt_tokens: Some(completion_response.usage.prompt_tokens),
-                completion_tokens: Some(completion_response.usage.completion_tokens),
-                finish_reason: Some(choice.finish_reason),
+                total_tokens: completion_response.usage.as_ref().and_then(|u| u.total_tokens),
+                prompt_tokens: completion_response.usage.as_ref().and_then(|u| u.prompt_tokens),
+                completion_tokens: completion_response.usage.as_ref().and_then(|u| u.completion_tokens),
+                finish_reason: choice.finish_reason,
                 latency_ms: None,
                 provider_request_id: Some(completion_response.id),
                 provider_metadata: None,
+                system_fingerprint: completion_response.system_fingerprint,
+                tool_calls: choice.message.as_ref().and_then(|m| m.tool_calls.clone()),
+                logprobs: choice.logprobs,
             });
         }
         
@@ -210,12 +227,16 @@ impl InferenceProvider for OpenAIProvider {
             model: model.to_string(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
-            // OpenAI supports these additional parameters
-            top_p: None,
-            frequency_penalty: None,
-            presence_penalty: None,
-            stop_sequences: None,
-            seed: None,
+            // OpenAI supports all these additional parameters
+            top_p: request.top_p,
+            frequency_penalty: request.frequency_penalty,
+            presence_penalty: request.presence_penalty,
+            stop_sequences: super::normalize_stop_sequences(&request.stop),
+            seed: request.seed,
+            stream: request.stream,
+            n: request.n,
+            logprobs: request.logprobs,
+            top_logprobs: request.top_logprobs,
             provider_params: None,
         })
     }
@@ -406,10 +427,7 @@ mod tests {
         let provider = OpenAIProvider::new(create_test_settings()).unwrap();
         
         let request = InferenceRequest {
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: "Hello".to_string(),
-            }],
+            messages: vec![Message::new("user", "Hello")],
             model: "gpt-3.5-turbo".to_string(),
             max_tokens: Some(100),
             temperature: Some(0.7),
@@ -418,6 +436,10 @@ mod tests {
             presence_penalty: None,
             stop_sequences: Some(vec!["STOP".to_string()]),
             seed: Some(42),
+            stream: None,
+            n: None,
+            logprobs: None,
+            top_logprobs: None,
             provider_params: None,
         };
         

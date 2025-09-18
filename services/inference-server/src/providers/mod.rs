@@ -9,9 +9,7 @@ pub mod lmstudio;
 pub mod mock;
 pub mod openai;
 
-
 // ===== Internal Service Models =====
-// These structs represent our normalized internal format that all providers work with
 
 /// Normalized request format that all providers understand
 #[derive(Debug, Clone)]
@@ -28,10 +26,12 @@ pub struct InferenceRequest {
     pub presence_penalty: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
     pub seed: Option<u64>,
+    pub stream: Option<bool>,
+    pub n: Option<u32>,
+    pub logprobs: Option<bool>,
+    pub top_logprobs: Option<u8>,
     
     // Extension point for provider-specific parameters
-    // This allows providers to pass through specific settings without
-    // modifying the core struct
     pub provider_params: Option<serde_json::Value>,
 }
 
@@ -51,9 +51,15 @@ pub struct InferenceResponse {
     // Additional metadata
     pub latency_ms: Option<u64>,
     pub provider_request_id: Option<String>,
+    pub system_fingerprint: Option<String>,
+    
+    // For function/tool calls
+    pub tool_calls: Option<Vec<crate::models::ToolCall>>,
+    
+    // For logprobs
+    pub logprobs: Option<crate::models::LogProbs>,
     
     // Extension point for provider-specific response data
-    // (e.g., Triton might return batch information, confidence scores, etc.)
     pub provider_metadata: Option<serde_json::Value>,
 }
 
@@ -66,6 +72,8 @@ pub enum ProviderError {
     RequestFailed { status: u16, message: String },
     Timeout,
     Configuration(String),
+    StreamingNotSupported,
+    ToolsNotSupported,
 }
 
 impl fmt::Display for ProviderError {
@@ -81,6 +89,8 @@ impl fmt::Display for ProviderError {
             }
             ProviderError::Timeout => write!(f, "Request timed out"),
             ProviderError::Configuration(msg) => write!(f, "Configuration error: {}", msg),
+            ProviderError::StreamingNotSupported => write!(f, "Streaming is not supported by this provider"),
+            ProviderError::ToolsNotSupported => write!(f, "Tool/function calling is not supported by this provider"),
         }
     }
 }
@@ -98,7 +108,6 @@ pub trait InferenceProvider: Send + Sync {
     ) -> Result<InferenceRequest, ProviderError>;
     
     /// Execute the inference request against the provider
-    /// Each provider implements their specific protocol here (HTTP, gRPC, etc.)
     async fn execute(
         &self,
         request: &InferenceRequest,
@@ -112,7 +121,6 @@ pub trait InferenceProvider: Send + Sync {
     ) -> CompletionResponse;
     
     /// High-level method that orchestrates the full flow
-    /// Most providers can use this default implementation
     async fn generate(
         &self,
         request: &CompletionRequest,
@@ -131,6 +139,16 @@ pub trait InferenceProvider: Send + Sync {
         None
     }
     
+    /// Check if streaming is supported
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+    
+    /// Check if tool/function calling is supported
+    fn supports_tools(&self) -> bool {
+        false
+    }
+    
     /// Optional: List available models
     async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
         Err(ProviderError::Configuration("Model listing not supported".into()))
@@ -145,34 +163,61 @@ pub trait InferenceProvider: Send + Sync {
 // ===== Helper Functions =====
 
 /// Standard implementation for building CompletionResponse from InferenceResponse
-/// This can be used by most providers as-is
+/// This handles all the optional fields properly
 pub fn standard_completion_response(
     response: &InferenceResponse,
     _original_request: &CompletionRequest,
 ) -> CompletionResponse {
+    // Build the message with optional fields
+    let mut message = Message::new("assistant", &response.text);
+    
+    // Add tool calls if present
+    if let Some(ref tool_calls) = response.tool_calls {
+        message.tool_calls = Some(tool_calls.clone());
+    }
+    
+    // Create choice with all optional fields
+    let choice = Choice {
+        index: 0,
+        message: Some(message),
+        delta: None,
+        finish_reason: response.finish_reason.clone(),
+        logprobs: response.logprobs.clone(),
+    };
+    
+    // Build usage with optional fields
+    let usage = if response.prompt_tokens.is_some() || 
+                   response.completion_tokens.is_some() || 
+                   response.total_tokens.is_some() {
+        Some(Usage {
+            prompt_tokens: response.prompt_tokens,
+            completion_tokens: response.completion_tokens,
+            total_tokens: response.total_tokens,
+        })
+    } else {
+        None
+    };
+    
     CompletionResponse {
-        id: format!("chatcmpl-{}", Uuid::now_v7()),
+        id: response.provider_request_id
+            .clone()
+            .unwrap_or_else(|| format!("chatcmpl-{}", Uuid::now_v7())),
         object: "chat.completion".to_string(),
         created: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),
         model: response.model_used.clone(),
-        choices: vec![Choice {
-            index: 0,
-            message: Message {
-                role: "assistant".to_string(),
-                content: response.text.clone(),
-            },
-            finish_reason: response.finish_reason
-                .as_deref()
-                .unwrap_or("stop")
-                .to_string(),
-        }],
-        usage: Usage {
-            prompt_tokens: response.prompt_tokens.unwrap_or(0),
-            completion_tokens: response.completion_tokens.unwrap_or(0),
-            total_tokens: response.total_tokens.unwrap_or(0),
-        },
+        choices: vec![choice],
+        usage,
+        system_fingerprint: response.system_fingerprint.clone(),
     }
+}
+
+/// Helper to convert stop sequences from various formats
+pub fn normalize_stop_sequences(stop: &Option<crate::models::StringOrArray>) -> Option<Vec<String>> {
+    stop.as_ref().map(|s| match s {
+        crate::models::StringOrArray::String(s) => vec![s.clone()],
+        crate::models::StringOrArray::Array(a) => a.clone(),
+    })
 }

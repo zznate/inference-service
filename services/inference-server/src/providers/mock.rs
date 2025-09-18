@@ -41,6 +41,15 @@ struct MockResponse {
     // Optional: simulate latency
     #[serde(default)]
     delay_ms: Option<u64>,
+    // Additional OpenAI response fields
+    #[serde(default)]
+    system_fingerprint: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<crate::models::ToolCall>>,
+    #[serde(default)]
+    function_call: Option<crate::models::FunctionCall>,
+    #[serde(default)]
+    logprobs: Option<crate::models::LogProbs>,
 }
 
 /// Settings for how to serve responses
@@ -221,11 +230,15 @@ impl InferenceProvider for MockProvider {
             model: model.to_string(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
-            top_p: None,
-            frequency_penalty: None,
-            presence_penalty: None,
-            stop_sequences: None,
-            seed: None,
+            top_p: request.top_p,
+            frequency_penalty: request.frequency_penalty,
+            presence_penalty: request.presence_penalty,
+            stop_sequences: super::normalize_stop_sequences(&request.stop),
+            seed: request.seed,
+            stream: request.stream,
+            n: request.n,
+            logprobs: request.logprobs,
+            top_logprobs: request.top_logprobs,
             provider_params: None,
         })
     }
@@ -267,6 +280,9 @@ impl InferenceProvider for MockProvider {
                 "scenario": scenario,
                 "mode": format!("{:?}", response_file.settings.mode),
             })),
+            system_fingerprint: mock_response.system_fingerprint,
+            tool_calls: mock_response.tool_calls,
+            logprobs: mock_response.logprobs,
         })
     }
     

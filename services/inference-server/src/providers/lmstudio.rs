@@ -15,9 +15,20 @@ pub struct LMStudioProvider {
 
 impl LMStudioProvider {
     pub fn new(settings: Arc<Settings>) -> Result<Self, ProviderError> {
-        // Build HTTP client with our config
+        // Build HTTP client with config (use defaults if not provided)
         let http_config = settings.inference.http.as_ref()
-            .ok_or_else(|| ProviderError::Configuration("HTTP configuration required".to_string()))?;
+            .cloned()
+            .unwrap_or_else(|| {
+                // Provide sane defaults for development/testing
+                HttpConfigSchema {
+                    timeout_secs: 30,
+                    connect_timeout_secs: 10,
+                    max_retries: 3,
+                    retry_backoff_ms: 100,
+                    keep_alive_secs: Some(30),
+                    max_idle_connections: Some(10),
+                }
+            });
 
         let client = reqwest::Client::builder()
             .timeout(http_config.timeout())
@@ -101,15 +112,21 @@ impl LMStudioProvider {
             .ok_or_else(|| ProviderError::InvalidResponse("No choices in response".to_string()))?;
         
         Ok(InferenceResponse {
-            text: choice.message.content,
+            text: choice.message.as_ref()
+                .and_then(|m| m.content.as_ref())
+                .map(|c| c.clone())
+                .unwrap_or_else(|| "".to_string()),
             model_used: completion_response.model,
-            total_tokens: Some(completion_response.usage.total_tokens),
-            prompt_tokens: Some(completion_response.usage.prompt_tokens),
-            completion_tokens: Some(completion_response.usage.completion_tokens),
-            finish_reason: Some(choice.finish_reason),
+            total_tokens: completion_response.usage.as_ref().and_then(|u| u.total_tokens),
+            prompt_tokens: completion_response.usage.as_ref().and_then(|u| u.prompt_tokens),
+            completion_tokens: completion_response.usage.as_ref().and_then(|u| u.completion_tokens),
+            finish_reason: choice.finish_reason,
             latency_ms: None,  // Could track this if we measure request time
-            provider_request_id: completion_response.id.into(),
+            provider_request_id: Some(completion_response.id),
             provider_metadata: None,  // LM Studio doesn't provide extra metadata
+            system_fingerprint: None,
+            tool_calls: None,
+            logprobs: None,
         })
     }
 }
@@ -132,12 +149,16 @@ impl InferenceProvider for LMStudioProvider {
             model: model.to_string(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
-            // Initialize the new fields with None/defaults
-            top_p: None,
-            frequency_penalty: None,
-            presence_penalty: None,
-            stop_sequences: None,
-            seed: None,
+            // Map the new fields from request
+            top_p: request.top_p,
+            frequency_penalty: request.frequency_penalty,
+            presence_penalty: request.presence_penalty,
+            stop_sequences: super::normalize_stop_sequences(&request.stop),
+            seed: request.seed,
+            stream: request.stream,
+            n: request.n,
+            logprobs: request.logprobs,
+            top_logprobs: request.top_logprobs,
             provider_params: None,
         })
     }
@@ -315,13 +336,11 @@ mod tests {
         let provider = LMStudioProvider::new(create_test_settings()).unwrap();
         
         let completion_req = CompletionRequest {
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: "Hello".to_string(),
-            }],
+            messages: vec![Message::new("user", "Hello")],
             model: Some("gpt-4".to_string()),
             max_tokens: Some(100),
             temperature: Some(0.7),
+            ..Default::default()
         };
         
         let inference_req = provider
@@ -424,6 +443,9 @@ mod tests {
             latency_ms: None,
             provider_request_id: None,
             provider_metadata: None,
+            system_fingerprint: None,
+            tool_calls: None,
+            logprobs: None,
         };
         
         let original_req = CompletionRequest {
@@ -431,13 +453,14 @@ mod tests {
             model: Some("gpt-4".to_string()),
             max_tokens: None,
             temperature: None,
+            ..Default::default()
         };
         
         let completion_resp = provider.build_completion_response(&inference_resp, &original_req);
         
         assert_eq!(completion_resp.model, "gpt-4");
-        assert_eq!(completion_resp.choices[0].message.content, "Hello!");
-        assert_eq!(completion_resp.usage.total_tokens, 15);
-        assert_eq!(completion_resp.choices[0].finish_reason, "stop");
+        assert_eq!(completion_resp.choices[0].message.as_ref().unwrap().content.as_ref().unwrap(), "Hello!");
+        assert_eq!(completion_resp.usage.as_ref().unwrap().total_tokens.unwrap(), 15);
+        assert_eq!(completion_resp.choices[0].finish_reason.as_ref().unwrap(), "stop");
     }
 }
