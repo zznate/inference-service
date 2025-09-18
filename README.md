@@ -358,13 +358,12 @@ inference-service/
 - [x] File-based logging with rotation
 - [ ] Metrics collection (Prometheus)
 - [ ] Distributed tracing (Jaeger/Zipkin)
-- [ ] Streaming responses
+- [X] Streaming responses
 - [ ] Triton Inference Server support
-- [ ] OpenAI API support
+- [X] OpenAI API support
 - [ ] Request/response caching
 - [ ] Rate limiting
 - [ ] Circuit breaker pattern
-- [ ] WebSocket support
 - [ ] Multi-model routing
 - [ ] A/B testing capabilities
 
@@ -375,7 +374,8 @@ Contributions are welcome! Please ensure:
 1. All tests pass (`cargo test`)
 2. Code follows Rust idioms and conventions
 3. New features include appropriate tests
-4. Documentation is updated as needed
+4. Any configuration additions or changes have sane defaults
+5. Documentation is updated as needed
 
 ## License
 
