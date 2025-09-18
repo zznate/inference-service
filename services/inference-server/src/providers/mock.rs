@@ -41,6 +41,15 @@ struct MockResponse {
     // Optional: simulate latency
     #[serde(default)]
     delay_ms: Option<u64>,
+    // Additional OpenAI response fields
+    #[serde(default)]
+    system_fingerprint: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<crate::models::ToolCall>>,
+    #[serde(default)]
+    function_call: Option<crate::models::FunctionCall>,
+    #[serde(default)]
+    logprobs: Option<crate::models::LogProbs>,
 }
 
 /// Settings for how to serve responses
@@ -271,9 +280,9 @@ impl InferenceProvider for MockProvider {
                 "scenario": scenario,
                 "mode": format!("{:?}", response_file.settings.mode),
             })),
-            system_fingerprint: None,  // Mock provider doesn't simulate this
-            tool_calls: None,         // Mock provider doesn't simulate tool calls yet
-            logprobs: None,          // Mock provider doesn't simulate logprobs yet
+            system_fingerprint: mock_response.system_fingerprint,
+            tool_calls: mock_response.tool_calls,
+            logprobs: mock_response.logprobs,
         })
     }
     
