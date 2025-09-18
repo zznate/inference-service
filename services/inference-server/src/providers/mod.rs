@@ -74,6 +74,7 @@ pub enum ProviderError {
     Configuration(String),
     StreamingNotSupported,
     ToolsNotSupported,
+    StreamError(String),
 }
 
 impl fmt::Display for ProviderError {
@@ -91,6 +92,7 @@ impl fmt::Display for ProviderError {
             ProviderError::Configuration(msg) => write!(f, "Configuration error: {}", msg),
             ProviderError::StreamingNotSupported => write!(f, "Streaming is not supported by this provider"),
             ProviderError::ToolsNotSupported => write!(f, "Tool/function calling is not supported by this provider"),
+            ProviderError::StreamError(msg) => write!(f, "Streaming error: {}", msg),
         }
     }
 }
