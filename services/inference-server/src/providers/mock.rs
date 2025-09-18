@@ -334,6 +334,89 @@ impl InferenceProvider for MockProvider {
         models.sort();
         Ok(models)
     }
+
+    // ===== Streaming Support =====
+
+    /// Mock provider supports streaming to demonstrate chunked delivery
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    /// Stream completion by chunking the mock response with realistic delays
+    async fn stream(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+    ) -> Result<std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<crate::models::StreamChunk, ProviderError>> + Send>>, ProviderError> {
+        use futures_util::stream::{self, StreamExt};
+        use std::time::Duration;
+        use uuid::Uuid;
+
+        // Reuse existing logic to get the mock response
+        let inference_req = self.build_inference_request(request, model)?;
+        let scenario = self.extract_scenario(&inference_req.model)?;
+        let response_file = self.load_responses(&scenario)?;
+        let mock_response = self.select_response(&response_file, &scenario);
+
+        // Generate a unique request ID for this stream
+        let request_id = format!("mock-{}-{}", scenario, Uuid::now_v7());
+        let model_name = mock_response.model_used.clone();
+
+        // Split response into tokens for streaming
+        let tokens = super::tokenize_for_streaming(&mock_response.text);
+
+        // Clone values for the final chunk closure
+        let final_request_id = request_id.clone();
+        let final_model_name = model_name.clone();
+        let final_finish_reason = mock_response.finish_reason.clone();
+        let final_usage_info = (mock_response.prompt_tokens, mock_response.completion_tokens, mock_response.total_tokens);
+
+        // Create stream that yields chunks with delay
+        let chunks_stream = stream::iter(tokens.into_iter().enumerate())
+            .then(move |(i, token)| {
+                let chunk_id = request_id.clone();
+                let chunk_model = model_name.clone();
+                let base_delay = mock_response.delay_ms.unwrap_or(50);
+
+                async move {
+                    // Simulate realistic token generation delay
+                    tokio::time::sleep(Duration::from_millis(base_delay)).await;
+
+                    if i == 0 {
+                        // First chunk includes role
+                        Ok(super::create_first_chunk(&chunk_id, &chunk_model, "assistant"))
+                    } else {
+                        // Content chunks
+                        Ok(super::create_content_chunk(&chunk_id, &chunk_model, &token))
+                    }
+                }
+            });
+
+        // Add final chunk with finish_reason and usage
+        let final_chunk_stream = stream::once(async move {
+            let usage = if final_usage_info.2.is_some() || final_usage_info.0.is_some() || final_usage_info.1.is_some() {
+                Some(crate::models::Usage {
+                    prompt_tokens: final_usage_info.0,
+                    completion_tokens: final_usage_info.1,
+                    total_tokens: final_usage_info.2,
+                })
+            } else {
+                None
+            };
+
+            Ok(super::create_final_chunk(
+                &final_request_id,
+                &final_model_name,
+                &final_finish_reason,
+                usage
+            ))
+        });
+
+        // Combine the streams
+        let combined_stream = chunks_stream.chain(final_chunk_stream);
+
+        Ok(Box::pin(combined_stream))
+    }
 }
 
 #[cfg(test)]

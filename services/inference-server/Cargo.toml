@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-axum = "0.8.4"
+axum = { version = "0.8.4", features = ["macros", "json"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 opentelemetry = { version = "0.30", features = ["logs"] }
 opentelemetry_sdk = { version = "0.30", features = ["rt-tokio", "logs"] }
 opentelemetry-stdout = { version = "0.30", features = ["logs"] }
@@ -22,3 +22,7 @@ uuid = { version = "1.2", features = ["v7"] }
 async-trait = "0.1"
 rand = "0.9"
 tempfile = { version = "3", features = [], default-features = false }  # For tests only
+# Streaming support
+futures-util = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+eventsource-stream = "0.2"  # For parsing OpenAI's SSE responses

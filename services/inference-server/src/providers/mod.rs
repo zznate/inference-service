@@ -130,6 +130,17 @@ pub trait InferenceProvider: Send + Sync {
         let inference_resp = self.execute(&inference_req).await?;
         Ok(self.build_completion_response(&inference_resp, request))
     }
+
+    /// Stream completion tokens as they're generated
+    /// Default implementation converts non-streaming response to chunked stream
+    async fn stream(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+    ) -> Result<std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<crate::models::StreamChunk, ProviderError>> + Send>>, ProviderError> {
+        // Default: not supported
+        Err(ProviderError::StreamingNotSupported)
+    }
     
     /// Get the name of this provider (for logging/metrics)
     fn name(&self) -> &str;
@@ -220,4 +231,138 @@ pub fn normalize_stop_sequences(stop: &Option<crate::models::StringOrArray>) -> 
         crate::models::StringOrArray::String(s) => vec![s.clone()],
         crate::models::StringOrArray::Array(a) => a.clone(),
     })
+}
+
+// ===== Streaming Utilities =====
+
+use std::time::{SystemTime, UNIX_EPOCH};
+use futures_util::Stream;
+use std::pin::Pin;
+
+/// Convert text to chunked tokens for streaming
+pub fn tokenize_for_streaming(text: &str) -> Vec<String> {
+    // Simple word-based tokenization for now
+    // In production, you might want more sophisticated tokenization
+    text.split_whitespace()
+        .map(|word| format!("{} ", word))
+        .collect()
+}
+
+/// Create a properly formatted first chunk
+pub fn create_first_chunk(id: &str, model: &str, role: &str) -> crate::models::StreamChunk {
+    crate::models::StreamChunk {
+        id: id.to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        model: model.to_string(),
+        choices: vec![crate::models::StreamChoice {
+            index: 0,
+            delta: crate::models::Delta {
+                role: Some(role.to_string()),
+                content: None,
+                tool_calls: None,
+                refusal: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        }],
+        system_fingerprint: None,
+        usage: None,
+    }
+}
+
+/// Create a content chunk
+pub fn create_content_chunk(id: &str, model: &str, content: &str) -> crate::models::StreamChunk {
+    crate::models::StreamChunk {
+        id: id.to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        model: model.to_string(),
+        choices: vec![crate::models::StreamChoice {
+            index: 0,
+            delta: crate::models::Delta {
+                role: None,
+                content: Some(content.to_string()),
+                tool_calls: None,
+                refusal: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        }],
+        system_fingerprint: None,
+        usage: None,
+    }
+}
+
+/// Create a properly formatted final chunk
+pub fn create_final_chunk(
+    id: &str,
+    model: &str,
+    finish_reason: &str,
+    usage: Option<crate::models::Usage>
+) -> crate::models::StreamChunk {
+    crate::models::StreamChunk {
+        id: id.to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        model: model.to_string(),
+        choices: vec![crate::models::StreamChoice {
+            index: 0,
+            delta: crate::models::Delta::default(),
+            finish_reason: Some(finish_reason.to_string()),
+            logprobs: None,
+        }],
+        system_fingerprint: None,
+        usage,
+    }
+}
+
+/// Convert a complete CompletionResponse to a stream of chunks
+/// This is used as a fallback for providers that don't have native streaming
+pub fn response_to_stream(
+    response: crate::models::CompletionResponse
+) -> Pin<Box<dyn Stream<Item = Result<crate::models::StreamChunk, ProviderError>> + Send>> {
+    use futures_util::stream::{self, StreamExt};
+
+    let mut chunks = Vec::new();
+
+    // Extract content from the first choice
+    let content = response.choices.first()
+        .and_then(|choice| choice.message.as_ref())
+        .and_then(|message| message.content.as_ref())
+        .map(|c| c.clone())
+        .unwrap_or_default();
+
+    let finish_reason = response.choices.first()
+        .and_then(|choice| choice.finish_reason.as_ref())
+        .map(|r| r.clone())
+        .unwrap_or_else(|| "stop".to_string());
+
+    // First chunk with role
+    chunks.push(Ok(create_first_chunk(&response.id, &response.model, "assistant")));
+
+    // Split content into tokens
+    let tokens = tokenize_for_streaming(&content);
+    for token in tokens {
+        chunks.push(Ok(create_content_chunk(&response.id, &response.model, &token)));
+    }
+
+    // Final chunk with finish_reason and usage
+    chunks.push(Ok(create_final_chunk(
+        &response.id,
+        &response.model,
+        &finish_reason,
+        response.usage
+    )));
+
+    Box::pin(stream::iter(chunks))
 }
