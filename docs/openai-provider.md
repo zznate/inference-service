@@ -1,23 +1,39 @@
-# OpenAI Provider Configuration
+# OpenAI Provider - API Reference
 
-The OpenAI provider allows the inference server to directly interface with OpenAI's API, supporting all GPT models including GPT-3.5-turbo, GPT-4, and GPT-4-turbo.
+The OpenAI provider provides **full compatibility** with the OpenAI Chat Completions API, supporting all GPT models and parameters with comprehensive validation. This acts as a drop-in replacement for direct OpenAI API calls with built-in parameter validation and intelligent defaults.
 
-## Configuration
+## Quick Start
+The following configuration uses the project defaults and represents a good starting point for development and testing: 
 
-### Basic Configuration
+### Minimal Configuration
+
+```yaml
+inference:
+  provider: openai
+  api_key: "sk-your-openai-api-key-here"  # Required
+  default_model: "gpt-3.5-turbo"
+  # HTTP config optional - intelligent defaults provided automatically
+```
+
+### Full Configuration
+
+As with any production service, you will want to tune the defaults of the HTTP configuration to match your environment. The following configuration represents a good starting point for production:
 
 ```yaml
 inference:
   provider: openai
   api_key: "sk-your-openai-api-key-here"
-  base_url: "https://api.openai.com/v1"  # Optional, defaults to OpenAI's API
+  organization_id: "org-your-org-id"      # Optional
+  base_url: "https://api.openai.com/v1"   # Optional, for Azure OpenAI etc.
   default_model: "gpt-3.5-turbo"
-  http:
+  http:                                    # Optional - has smart defaults
     timeout_secs: 30
     connect_timeout_secs: 10
     keep_alive_secs: 30
     max_idle_connections: 10
 ```
+
+The reqwest HTTP client is used under the hood, and the configuration is passed to it. For more information, see the [reqwest documentation](https://docs.rs/reqwest/latest/reqwest/struct.ClientBuilder.html). If you need to tune the HTTP client further, patches are welcome provided they include sane defaults for all parameters.
 
 ### Environment-Specific Configurations
 
@@ -100,7 +116,7 @@ curl -X POST http://localhost:3000/v1/chat/completions \
   }'
 ```
 
-### Advanced Chat Completion with Parameters
+### Advanced Chat Completion with Full Parameter Set
 
 ```bash
 curl -X POST http://localhost:3000/v1/chat/completions \
@@ -116,8 +132,35 @@ curl -X POST http://localhost:3000/v1/chat/completions \
     "top_p": 0.9,
     "frequency_penalty": 0.1,
     "presence_penalty": 0.1,
-    "stop": ["END", "STOP"]
+    "stop": ["END", "STOP"],
+    "seed": 42
   }'
+```
+
+### Parameter Validation Examples
+
+The server validates all parameters and returns detailed error messages:
+
+```bash
+# Invalid temperature (must be 0.0-2.0)
+curl -X POST http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "temperature": 3.0
+  }'
+# Returns: 400 Bad Request with validation error
+
+# Invalid top_p (must be 0.0-1.0)
+curl -X POST http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "top_p": 1.5
+  }'
+# Returns: 400 Bad Request with validation error
 ```
 
 ### List Available Models
@@ -134,19 +177,31 @@ curl http://localhost:3000/health
 
 ## Supported OpenAI Parameters
 
-The OpenAI provider supports all standard OpenAI chat completion parameters:
+The OpenAI provider supports all standard OpenAI chat completion parameters with comprehensive validation:
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `model` | string | The OpenAI model to use (e.g., "gpt-3.5-turbo", "gpt-4") |
-| `messages` | array | List of messages in the conversation |
-| `max_tokens` | integer | Maximum number of tokens to generate |
-| `temperature` | number | Controls randomness (0.0 to 2.0) |
-| `top_p` | number | Nucleus sampling parameter (0.0 to 1.0) |
-| `frequency_penalty` | number | Penalize frequent tokens (-2.0 to 2.0) |
-| `presence_penalty` | number | Penalize new tokens (-2.0 to 2.0) |
-| `stop` | array | Stop sequences to halt generation |
-| `seed` | integer | For deterministic outputs (when supported) |
+| Parameter | Type | Validation | Description |
+|-----------|------|------------|-------------|
+| `model` | string | Required | The OpenAI model to use (e.g., "gpt-3.5-turbo", "gpt-4") |
+| `messages` | array | Required, non-empty | List of messages in the conversation |
+| `max_tokens` | integer | 1-131072 | Maximum number of tokens to generate |
+| `temperature` | number | 0.0-2.0 | Controls randomness |
+| `top_p` | number | 0.0-1.0 | Nucleus sampling parameter |
+| `frequency_penalty` | number | -2.0-2.0 | Penalize frequent tokens |
+| `presence_penalty` | number | -2.0-2.0 | Penalize new tokens |
+| `stop` | array/string | Max 4 sequences | Stop sequences to halt generation |
+| `seed` | integer | Optional | For deterministic outputs (when supported) |
+| `stream` | boolean | Optional | Stream partial message deltas |
+| `n` | integer | 1-128 | Number of chat completion choices to generate |
+| `logprobs` | boolean | Optional | Return log probabilities of output tokens |
+| `top_logprobs` | integer | 0-20 | Number of most likely tokens to return (requires logprobs) |
+
+### Validation Features
+
+- **Parameter bounds checking**: All numeric parameters are validated against OpenAI's documented ranges
+- **Model validation**: Checks against configured allowed models list (if specified)
+- **Message validation**: Ensures messages array is non-empty with valid role/content pairs
+- **Stop sequences**: Validates array length and individual sequence constraints
+- **Detailed error responses**: Returns specific validation errors with parameter names and valid ranges
 
 ## Error Handling
 
@@ -168,15 +223,19 @@ The provider filters the model list to only include chat-compatible models. Supp
 
 ## Performance Considerations
 
-### Timeouts
-- **Default timeout**: 30 seconds
+### Intelligent Defaults
+The provider automatically configures sensible defaults for non-production environments:
+- **Request timeout**: 30 seconds
 - **Connect timeout**: 10 seconds
-- **Recommended production timeout**: 60+ seconds for GPT-4
-
-### Connection Pooling
-- **Default max idle connections**: 10
 - **Keep-alive duration**: 30 seconds
-- **Production recommendation**: Increase to 20+ for high traffic
+- **Max idle connections**: 10
+- **Max retries**: 3 with 100ms backoff
+
+### Production Tuning
+For production deployments, consider increasing timeouts and connection limits:
+- **Recommended timeout**: 60+ seconds for GPT-4
+- **Max idle connections**: 20+ for high traffic
+- **Keep-alive duration**: 60+ seconds for sustained load
 
 ### Rate Limiting
 OpenAI enforces rate limits based on your API tier. The provider will return HTTP 429 when limits are exceeded.

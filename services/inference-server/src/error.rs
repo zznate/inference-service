@@ -63,6 +63,16 @@ impl IntoResponse for ApiError {
                         "PROVIDER_CONFIGURATION_ERROR",
                         msg,
                     ),
+                    ProviderError::StreamingNotSupported => (
+                        StatusCode::BAD_REQUEST,
+                        "STREAMING_NOT_SUPPORTED",
+                        "Streaming is not supported by this provider".to_string(),
+                    ),
+                    ProviderError::ToolsNotSupported => (
+                        StatusCode::BAD_REQUEST,
+                        "TOOLS_NOT_SUPPORTED",
+                        "Tool/function calling is not supported by this provider".to_string(),
+                    ),
                 };
                 
                 (status, Json(ErrorResponse {

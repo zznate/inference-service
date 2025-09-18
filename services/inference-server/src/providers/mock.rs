@@ -221,11 +221,15 @@ impl InferenceProvider for MockProvider {
             model: model.to_string(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
-            top_p: None,
-            frequency_penalty: None,
-            presence_penalty: None,
-            stop_sequences: None,
-            seed: None,
+            top_p: request.top_p,
+            frequency_penalty: request.frequency_penalty,
+            presence_penalty: request.presence_penalty,
+            stop_sequences: super::normalize_stop_sequences(&request.stop),
+            seed: request.seed,
+            stream: request.stream,
+            n: request.n,
+            logprobs: request.logprobs,
+            top_logprobs: request.top_logprobs,
             provider_params: None,
         })
     }
@@ -267,6 +271,9 @@ impl InferenceProvider for MockProvider {
                 "scenario": scenario,
                 "mode": format!("{:?}", response_file.settings.mode),
             })),
+            system_fingerprint: None,  // Mock provider doesn't simulate this
+            tool_calls: None,         // Mock provider doesn't simulate tool calls yet
+            logprobs: None,          // Mock provider doesn't simulate logprobs yet
         })
     }
     

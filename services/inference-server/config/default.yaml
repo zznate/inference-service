@@ -6,12 +6,18 @@ inference:
   provider: lmstudio
   base_url: "http://127.0.0.1:1234/v1"
   default_model: "gpt-oss-20b"
-  # Optional: specify allowed models 
+  # Optional: specify allowed models
   # allowed_models:
   #   - "gpt-oss-20b"
   #   - "llama-2-7b"
   #   - "mistral-7b"
   timeout_secs: 30
+  # Optional: HTTP client configuration (good defaults provided)
+  # http:
+  #   timeout_secs: 30
+  #   connect_timeout_secs: 10
+  #   keep_alive_secs: 30
+  #   max_idle_connections: 10
 
 logging:
   level: info

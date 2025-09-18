@@ -12,7 +12,7 @@ use tracing::{debug, info, instrument};
 use std::sync::Arc;
 
 use providers::InferenceProvider;
-use validations::{validate_completion_request, determine_model, validate_model_allowed};
+use validations::{validate_completion_request, determine_model, validate_model_allowed, validate_provider_capabilities, ValidationError};
 
 use config::Settings;
 use error::ApiError;
@@ -90,17 +90,19 @@ fn create_provider(settings: &Arc<Settings>) -> Result<Arc<dyn InferenceProvider
         },
     }
 }
+// Update the generate_completion function in main.rs:
 
 #[instrument(skip(state), fields(
     message_count = request.messages.len(),
     model = request.model.as_deref().unwrap_or("default"),
+    stream = request.stream.unwrap_or(false),
 ))]
 async fn generate_completion(
     State(state): State<AppState>,
     Json(request): Json<CompletionRequest>,
 ) -> Result<Json<CompletionResponse>, ApiError> {
 
-    // Validate the incoming request
+    // Validate the incoming request structure
     validate_completion_request(&request)?;
     
     // Determine which model to use (applies defaults if needed)
@@ -112,23 +114,46 @@ async fn generate_completion(
 
     // Validate the model is allowed (if restrictions are configured)
     validate_model_allowed(model, state.settings.inference.allowed_models.as_ref())?;
+    
+    // Validate provider capabilities
+    validate_provider_capabilities(
+        &request,
+        state.provider.supports_streaming(),
+        state.provider.supports_tools(),
+    )?;
 
     debug!("Using model: {}", model);
+    
+    // Check if streaming is requested
+    if request.stream == Some(true) {
+        // TODO: Implement streaming response
+        // For now, return error since we don't support streaming yet
+        return Err(ApiError::Validation(ValidationError::StreamingNotSupported));
+    }
 
-    // Use the new provider contract - it now returns CompletionResponse directly
+    // Use the provider to generate completion
     let response = state.provider
         .generate(&request, model)
         .await
         .map_err(|e| ApiError::Provider(e))?;
 
-    info!(
-        model = model,
-        choices_count = response.choices.len(),
-        total_tokens = response.usage.total_tokens,
-        prompt_tokens = response.usage.prompt_tokens,
-        completion_tokens = response.usage.completion_tokens,
-        "Completion successful"
-    );
+    // Log only if we have usage information
+    if let Some(ref usage) = response.usage {
+        info!(
+            model = model,
+            choices_count = response.choices.len(),
+            total_tokens = ?usage.total_tokens,
+            prompt_tokens = ?usage.prompt_tokens,
+            completion_tokens = ?usage.completion_tokens,
+            "Completion successful"
+        );
+    } else {
+        info!(
+            model = model,
+            choices_count = response.choices.len(),
+            "Completion successful (no usage data)"
+        );
+    }
     
     Ok(Json(response))
 }
