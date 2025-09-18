@@ -1,0 +1,46 @@
+# Complete OpenAI API Response Mock
+# This mock represents a response with all possible OpenAI API fields
+# Use model "mock-openai-complete" to access this response
+
+responses:
+  - text: "Hello! How can I assist you today?"
+    model_used: "gpt-3.5-turbo-0125"
+    prompt_tokens: 9
+    completion_tokens: 12
+    total_tokens: 21
+    finish_reason: "stop"
+    delay_ms: 100
+
+settings:
+  mode: first
+
+# This mock configuration will generate a response equivalent to:
+# {
+#   "id": "chatcmpl-123abc",
+#   "object": "chat.completion",
+#   "created": 1677652288,
+#   "model": "gpt-3.5-turbo-0125",
+#   "system_fingerprint": "fp_44709d6fcb",
+#   "choices": [
+#     {
+#       "index": 0,
+#       "message": {
+#         "role": "assistant",
+#         "content": "Hello! How can I assist you today?",
+#         "tool_calls": [...],
+#         "function_call": {...}
+#       },
+#       "logprobs": {...},
+#       "finish_reason": "stop"
+#     }
+#   ],
+#   "usage": {
+#     "prompt_tokens": 9,
+#     "completion_tokens": 12,
+#     "total_tokens": 21
+#   }
+# }
+#
+# Note: The mock provider currently supports the basic response structure.
+# Advanced fields like tool_calls, function_call, and logprobs are not yet
+# implemented in the mock provider but are supported by the API structure.
