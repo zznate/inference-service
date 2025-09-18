@@ -5,24 +5,43 @@ mod error;
 mod config;
 mod models;
 
-use axum::{extract::{State}, routing::{get, post}, Json, Router};
+use axum::{extract::{State}, routing::{get, post}, Json, Router, response::{Response, IntoResponse, sse::{Event, KeepAlive, Sse}}};
 use tokio::net::TcpListener;
 use serde::Serialize;
 use tracing::{debug, info, instrument};
 use std::sync::Arc;
+use std::pin::Pin;
+use futures_util::{Stream, StreamExt};
+use std::convert::Infallible;
+use std::time::Duration;
 
 use providers::InferenceProvider;
 use validations::{validate_completion_request, determine_model, validate_model_allowed, validate_provider_capabilities, ValidationError};
 
 use config::Settings;
 use error::ApiError;
-use models::{CompletionRequest, CompletionResponse};
+use models::{CompletionRequest, CompletionResponse, StreamChunk};
 
 // Hold the http client and provider settings
 #[derive(Clone)]
 struct AppState {
     provider: Arc<dyn InferenceProvider>,
     settings: Arc<Settings>,
+}
+
+// Enum that can return either JSON response or SSE stream
+enum CompletionOrStream {
+    Json(Json<CompletionResponse>),
+    Stream(Sse<Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>>),
+}
+
+impl IntoResponse for CompletionOrStream {
+    fn into_response(self) -> Response {
+        match self {
+            CompletionOrStream::Json(json) => json.into_response(),
+            CompletionOrStream::Stream(sse) => sse.into_response(),
+        }
+    }
 }
 
 // Root response to health check
@@ -100,11 +119,11 @@ fn create_provider(settings: &Arc<Settings>) -> Result<Arc<dyn InferenceProvider
 async fn generate_completion(
     State(state): State<AppState>,
     Json(request): Json<CompletionRequest>,
-) -> Result<Json<CompletionResponse>, ApiError> {
+) -> Result<CompletionOrStream, ApiError> {
 
     // Validate the incoming request structure
     validate_completion_request(&request)?;
-    
+
     // Determine which model to use (applies defaults if needed)
     let model = determine_model(
         request.model.as_deref(),
@@ -114,7 +133,7 @@ async fn generate_completion(
 
     // Validate the model is allowed (if restrictions are configured)
     validate_model_allowed(model, state.settings.inference.allowed_models.as_ref())?;
-    
+
     // Validate provider capabilities
     validate_provider_capabilities(
         &request,
@@ -123,15 +142,54 @@ async fn generate_completion(
     )?;
 
     debug!("Using model: {}", model);
-    
+
     // Check if streaming is requested
     if request.stream == Some(true) {
-        // TODO: Implement streaming response
-        // For now, return error since we don't support streaming yet
-        return Err(ApiError::Validation(ValidationError::StreamingNotSupported));
+        // Get stream from provider
+        let provider_stream = state.provider
+            .stream(&request, model)
+            .await
+            .map_err(|e| ApiError::Provider(e))?;
+
+        // Convert to SSE events
+        let sse_stream = provider_stream
+            .map(|chunk_result| {
+                match chunk_result {
+                    Ok(chunk) => {
+                        // Format as SSE: "data: {json}\n\n"
+                        let json = serde_json::to_string(&chunk).unwrap_or_default();
+                        Ok(Event::default().data(json))
+                    },
+                    Err(e) => {
+                        // Send error in stream
+                        let error = serde_json::json!({
+                            "error": {
+                                "message": e.to_string(),
+                                "type": "stream_error"
+                            }
+                        });
+                        Ok(Event::default().data(error.to_string()))
+                    }
+                }
+            })
+            .chain(futures_util::stream::once(async {
+                // Send [DONE] marker
+                Ok(Event::default().data("[DONE]"))
+            }));
+
+        info!(
+            model = model,
+            stream = true,
+            "Streaming completion started"
+        );
+
+        return Ok(CompletionOrStream::Stream(
+            Sse::new(Box::pin(sse_stream) as Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>)
+                .keep_alive(KeepAlive::default())
+        ));
     }
 
-    // Use the provider to generate completion
+    // Non-streaming: Use the provider to generate completion
     let response = state.provider
         .generate(&request, model)
         .await
@@ -145,17 +203,19 @@ async fn generate_completion(
             total_tokens = ?usage.total_tokens,
             prompt_tokens = ?usage.prompt_tokens,
             completion_tokens = ?usage.completion_tokens,
+            stream = false,
             "Completion successful"
         );
     } else {
         info!(
             model = model,
             choices_count = response.choices.len(),
+            stream = false,
             "Completion successful (no usage data)"
         );
     }
-    
-    Ok(Json(response))
+
+    Ok(CompletionOrStream::Json(Json(response)))
 }
 
 async fn list_models(

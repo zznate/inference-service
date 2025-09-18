@@ -73,6 +73,11 @@ impl IntoResponse for ApiError {
                         "TOOLS_NOT_SUPPORTED",
                         "Tool/function calling is not supported by this provider".to_string(),
                     ),
+                    ProviderError::StreamError(msg) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "STREAM_ERROR",
+                        msg,
+                    ),
                 };
                 
                 (status, Json(ErrorResponse {

@@ -1,11 +1,13 @@
 use super::{InferenceProvider, InferenceRequest, InferenceResponse, ProviderError, standard_completion_response};
 use crate::config::{HttpConfigSchema, Settings};
-use crate::models::{CompletionRequest, CompletionResponse};
+use crate::models::{CompletionRequest, CompletionResponse, StreamChunk};
 use std::sync::Arc;
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json;
 use tracing::{debug, error, instrument};
+use std::pin::Pin;
+use futures_util::{Stream, StreamExt, TryStreamExt};
 
 pub struct OpenAIProvider {
     client: reqwest::Client,
@@ -387,6 +389,100 @@ impl InferenceProvider for OpenAIProvider {
             .collect();
         
         Ok(chat_models)
+    }
+
+    // ===== Streaming Support =====
+
+    /// OpenAI provider supports native streaming
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    /// Stream completion using OpenAI's native SSE streaming
+    async fn stream(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+    ) -> Result<std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<crate::models::StreamChunk, ProviderError>> + Send>>, ProviderError> {
+        use eventsource_stream::Eventsource;
+        use futures_util::stream::{StreamExt, TryStreamExt};
+
+        // Reuse existing request building logic but add stream: true
+        let inference_req = self.build_inference_request(request, model)?;
+        let mut request_body = self.build_request_body(&inference_req);
+        request_body["stream"] = serde_json::json!(true);
+
+        debug!("Sending streaming request to OpenAI: {}", request_body);
+
+        // Execute HTTP request
+        let response = self.client
+            .post(format!("{}/chat/completions", self.settings.inference.base_url))
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| {
+                error!("Failed to send streaming request to OpenAI: {}", e);
+                if e.is_timeout() {
+                    ProviderError::Timeout
+                } else if e.is_connect() {
+                    ProviderError::ConnectionFailed(format!("Connection failed: {}", e))
+                } else {
+                    ProviderError::RequestFailed {
+                        status: 0,
+                        message: e.to_string(),
+                    }
+                }
+            })?;
+
+        // Check HTTP status
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            error!("OpenAI streaming returned error status {}: {}", status, error_text);
+            return Err(ProviderError::RequestFailed {
+                status: status.as_u16(),
+                message: format!("OpenAI streaming error: {}", error_text),
+            });
+        }
+
+        // Parse SSE stream from OpenAI using correct API
+        let bytes_stream = response.bytes_stream().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        });
+
+        let sse_stream = bytes_stream
+            .eventsource()
+            .filter_map(|event_result| async move {
+                match event_result {
+                    Ok(event) => {
+                        let data = &event.data;
+                        debug!("Received SSE event type: {:?}, data: {}", event.event, data);
+
+                        if data == "[DONE]" {
+                            debug!("OpenAI stream completed with [DONE] marker");
+                            None // End of stream marker
+                        } else {
+                            // Parse streaming chunk
+                            match serde_json::from_str::<StreamChunk>(&data) {
+                                Ok(chunk) => {
+                                    debug!("Received OpenAI stream chunk: {:?}", chunk.choices.first().map(|c| &c.delta.content));
+                                    Some(Ok(chunk))
+                                },
+                                Err(e) => {
+                                    error!("Failed to parse OpenAI stream chunk: {} - Data: {}", e, data);
+                                    Some(Err(ProviderError::StreamError(format!("Invalid stream chunk: {}", e))))
+                                }
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        error!("SSE parsing error: {}", e);
+                        Some(Err(ProviderError::StreamError(format!("SSE error: {}", e))))
+                    }
+                }
+            });
+
+        Ok(Box::pin(sse_stream))
     }
 }
 

@@ -1,6 +1,6 @@
 # OpenAI Provider - API Reference
 
-The OpenAI provider provides **full compatibility** with the OpenAI Chat Completions API, supporting all GPT models and parameters with comprehensive validation. This acts as a drop-in replacement for direct OpenAI API calls with built-in parameter validation and intelligent defaults.
+The OpenAI provider provides **full compatibility** with the OpenAI Chat Completions API, supporting all GPT models and parameters with comprehensive validation. This acts as a drop-in replacement for direct OpenAI API calls with built-in parameter validation, intelligent defaults, and **native streaming support** using Server-Sent Events (SSE).
 
 ## Quick Start
 The following configuration uses the project defaults and represents a good starting point for development and testing: 
@@ -137,6 +137,36 @@ curl -X POST http://localhost:3000/v1/chat/completions \
   }'
 ```
 
+### Streaming Chat Completion
+
+For real-time token-by-token responses, enable streaming with the `stream` parameter:
+
+```bash
+curl -N -X POST http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [
+      {"role": "user", "content": "Write a short story about a robot."}
+    ],
+    "stream": true,
+    "max_tokens": 200
+  }'
+```
+
+**Response Format (Server-Sent Events):**
+```
+data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"content":"Once"}}]}
+
+data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"content":" upon"}}]}
+
+data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":50,"total_tokens":60}}
+
+data: [DONE]
+```
+
 ### Parameter Validation Examples
 
 The server validates all parameters and returns detailed error messages:
@@ -190,7 +220,7 @@ The OpenAI provider supports all standard OpenAI chat completion parameters with
 | `presence_penalty` | number | -2.0-2.0 | Penalize new tokens |
 | `stop` | array/string | Max 4 sequences | Stop sequences to halt generation |
 | `seed` | integer | Optional | For deterministic outputs (when supported) |
-| `stream` | boolean | Optional | Stream partial message deltas |
+| **`stream`** | **boolean** | **Optional** | **Stream partial message deltas via Server-Sent Events** |
 | `n` | integer | 1-128 | Number of chat completion choices to generate |
 | `logprobs` | boolean | Optional | Return log probabilities of output tokens |
 | `top_logprobs` | integer | 0-20 | Number of most likely tokens to return (requires logprobs) |
@@ -201,7 +231,86 @@ The OpenAI provider supports all standard OpenAI chat completion parameters with
 - **Model validation**: Checks against configured allowed models list (if specified)
 - **Message validation**: Ensures messages array is non-empty with valid role/content pairs
 - **Stop sequences**: Validates array length and individual sequence constraints
+- **Streaming validation**: Ensures provider supports streaming when `stream: true` is requested
 - **Detailed error responses**: Returns specific validation errors with parameter names and valid ranges
+
+## Streaming Support
+
+The OpenAI provider includes **native streaming support** that connects directly to OpenAI's streaming API:
+
+### Features
+- **Real-time responses**: Token-by-token delivery as they're generated
+- **Server-Sent Events**: Standard SSE format for web compatibility
+- **Graceful error handling**: Stream errors are reported within the SSE stream
+- **OpenAI compatibility**: Identical format to OpenAI's native streaming
+- **Automatic parsing**: Handles `[DONE]` markers and chunk formatting
+
+### Client Implementation
+
+**JavaScript/Browser:**
+```javascript
+const response = await fetch('/v1/chat/completions', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    model: 'gpt-4',
+    messages: [{role: 'user', content: 'Hello!'}],
+    stream: true
+  })
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+
+  const chunk = decoder.decode(value);
+  const lines = chunk.split('\n');
+
+  for (const line of lines) {
+    if (line.startsWith('data: ')) {
+      const data = line.slice(6);
+      if (data === '[DONE]') return;
+
+      const parsed = JSON.parse(data);
+      const content = parsed.choices[0]?.delta?.content;
+      if (content) {
+        console.log(content); // Display token
+      }
+    }
+  }
+}
+```
+
+**Python:**
+```python
+import requests
+import json
+
+response = requests.post(
+    'http://localhost:3000/v1/chat/completions',
+    headers={'Content-Type': 'application/json'},
+    json={
+        'model': 'gpt-4',
+        'messages': [{'role': 'user', 'content': 'Hello!'}],
+        'stream': True
+    },
+    stream=True
+)
+
+for line in response.iter_lines():
+    if line.startswith(b'data: '):
+        data = line[6:].decode('utf-8')
+        if data == '[DONE]':
+            break
+
+        chunk = json.loads(data)
+        content = chunk['choices'][0]['delta'].get('content', '')
+        if content:
+            print(content, end='', flush=True)
+```
 
 ## Error Handling
 
@@ -212,6 +321,7 @@ The provider maps OpenAI API errors to appropriate HTTP status codes:
 - **403 Forbidden**: Insufficient permissions or quota exceeded
 - **429 Too Many Requests**: Rate limit exceeded
 - **500 Internal Server Error**: OpenAI API errors or network issues
+- **Stream Errors**: Reported within SSE stream for streaming requests
 
 ## Model Compatibility
 
@@ -233,9 +343,10 @@ The provider automatically configures sensible defaults for non-production envir
 
 ### Production Tuning
 For production deployments, consider increasing timeouts and connection limits:
-- **Recommended timeout**: 60+ seconds for GPT-4
+- **Recommended timeout**: 60+ seconds for GPT-4 (120+ for streaming)
 - **Max idle connections**: 20+ for high traffic
 - **Keep-alive duration**: 60+ seconds for sustained load
+- **Streaming considerations**: Longer timeouts for streaming connections
 
 ### Rate Limiting
 OpenAI enforces rate limits based on your API tier. The provider will return HTTP 429 when limits are exceeded.
@@ -281,8 +392,17 @@ RUST_LOG=debug cargo run
 This will show:
 - HTTP request details
 - OpenAI API responses
+- Streaming chunk processing
 - Error details
 - Performance metrics
+
+**Streaming Debug Example:**
+```bash
+# Test streaming with verbose output
+curl -v -N -X POST http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "Count to 5"}], "stream": true}'
+```
 
 ## Cost Optimization
 
@@ -338,12 +458,37 @@ stringData:
 
 The provider includes built-in observability:
 
-- **Request latency**: Tracked per request
+- **Request latency**: Tracked per request (streaming and non-streaming)
 - **Error rates**: Categorized by error type
-- **Token usage**: Available in response metadata
+- **Token usage**: Available in response metadata and final streaming chunks
+- **Streaming metrics**: Track stream duration and chunk delivery
 - **Health checks**: Regular connectivity verification
 
 Access metrics via the health endpoint:
 ```bash
 curl http://localhost:3000/health
+```
+
+### Streaming Performance Monitoring
+
+**Key Metrics:**
+- Time to first token (TTFT)
+- Tokens per second during streaming
+- Stream completion rate
+- Connection duration for streaming requests
+
+**Example Usage Tracking:**
+```json
+{
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 50,
+    "total_tokens": 60
+  },
+  "stream_stats": {
+    "duration_ms": 2500,
+    "chunks_sent": 12,
+    "avg_chunk_interval_ms": 208
+  }
+}
 ```

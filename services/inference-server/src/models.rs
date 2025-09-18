@@ -184,7 +184,7 @@ pub struct TopLogProb {
     pub bytes: Option<Vec<u8>>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Usage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u32>,
@@ -196,17 +196,58 @@ pub struct Usage {
 
 // ===== Streaming Response Models =====
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct StreamCompletionResponse {
+/// Streaming response chunk matching OpenAI format
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StreamChunk {
     pub id: String,
-    pub object: String, // "chat.completion.chunk"
+    pub object: String, // Always "chat.completion.chunk"
     pub created: u64,
     pub model: String,
-    pub choices: Vec<Choice>, // Uses delta instead of message
+    pub choices: Vec<StreamChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>, // Only in final chunk for some providers
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StreamChoice {
+    pub index: u32,
+    pub delta: Delta,  // Note: delta, not message for streaming
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<LogProbs>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct Delta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>, // Only in first chunk
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>, // Token content
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallDelta>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolCallDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub tool_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<FunctionCallDelta>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FunctionCallDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
 }
 
 // ===== Error Response =====

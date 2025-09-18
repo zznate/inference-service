@@ -1,12 +1,14 @@
 use super::{InferenceProvider, InferenceRequest, InferenceResponse, ProviderError, standard_completion_response};
 use crate::config::{HttpConfigSchema, Settings};
-use crate::models::{CompletionRequest, CompletionResponse};
+use crate::models::{CompletionRequest, CompletionResponse, StreamChunk};
 use std::sync::Arc;
 use async_trait::async_trait;
 use reqwest;
 use serde_json;
 use serde::Deserialize;
 use tracing::{debug, error, instrument};
+use std::pin::Pin;
+use futures_util::{Stream, StreamExt, TryStreamExt};
 
 pub struct LMStudioProvider {
     client: reqwest::Client,
@@ -299,6 +301,103 @@ impl InferenceProvider for LMStudioProvider {
             .map_err(|e| ProviderError::InvalidResponse(format!("Invalid models response: {}", e)))?;
         
         Ok(models_response.data.into_iter().map(|m| m.id).collect())
+    }
+
+    // ===== Streaming Support =====
+
+    /// LM Studio supports streaming since it's OpenAI-compatible
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    /// Stream completion using LM Studio's SSE API (OpenAI-compatible)
+    async fn stream(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk, ProviderError>> + Send>>, ProviderError> {
+        use eventsource_stream::Eventsource;
+        use futures_util::stream::StreamExt;
+
+        // Build inference request and add streaming
+        let inference_req = self.build_inference_request(request, model)?;
+        let mut request_body = self.build_request_body(&inference_req);
+
+        // Enable streaming
+        request_body["stream"] = serde_json::json!(true);
+
+        debug!("Sending streaming request to LM Studio: {}", request_body);
+
+        // Make streaming HTTP request
+        let response = self.client
+            .post(format!("{}/v1/chat/completions", self.settings.inference.base_url))
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| {
+                error!("Failed to send streaming request to LM Studio: {}", e);
+                if e.is_timeout() {
+                    ProviderError::Timeout
+                } else if e.is_connect() {
+                    ProviderError::ConnectionFailed(format!("Connection failed: {}", e))
+                } else {
+                    ProviderError::RequestFailed {
+                        status: 0,
+                        message: e.to_string(),
+                    }
+                }
+            })?;
+
+        // Check HTTP status before processing stream
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            error!("LM Studio returned error status {}: {}", status, error_text);
+            return Err(ProviderError::RequestFailed {
+                status: status.as_u16(),
+                message: format!("LM Studio streaming error: {}", error_text),
+            });
+        }
+
+        // Convert response to byte stream
+        let bytes_stream = response.bytes_stream().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        });
+
+        // Parse SSE events from LM Studio using correct API
+        let sse_stream = bytes_stream
+            .eventsource()
+            .filter_map(|event_result| async move {
+                match event_result {
+                    Ok(event) => {
+                        let data = &event.data;
+                        debug!("Received SSE event type: {:?}, data: {}", event.event, data);
+
+                        if data == "[DONE]" {
+                            debug!("LM Studio stream completed with [DONE] marker");
+                            None // End of stream marker
+                        } else {
+                            // Parse streaming chunk
+                            match serde_json::from_str::<StreamChunk>(&data) {
+                                Ok(chunk) => {
+                                    debug!("Received LM Studio stream chunk: {:?}", chunk);
+                                    Some(Ok(chunk))
+                                },
+                                Err(e) => {
+                                    error!("Failed to parse LM Studio stream chunk: {} - Data: {}", e, data);
+                                    Some(Err(ProviderError::StreamError(format!("Invalid stream chunk: {}", e))))
+                                }
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        error!("SSE parsing error: {}", e);
+                        Some(Err(ProviderError::StreamError(format!("SSE error: {}", e))))
+                    }
+                }
+            });
+
+        Ok(Box::pin(sse_stream))
     }
 }
 
