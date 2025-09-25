@@ -1,10 +1,12 @@
 # Inference Service
 
-A production-ready Rust-based inference server that provides a unified REST API for multiple AI model providers. Currently supports LM Studio with a clean abstraction layer for adding additional providers. Support for OpenAI and a local Triton Inference Server is coming soon. 
+A production-ready Rust-based LLM Proxy and inference server that provides a unified REST API (based on OpenAI's API) for multiple AI model providers. Currently supports LM Studio and OpenAI with a clean abstraction layer for adding additional providers. This server can also be used for testing responses via a mock provider which can simulate responses from a model with timeouts and errors. 
+
+Support for a local Triton Inference Server is coming soon. 
 
 ## Features
 
-- **OpenAI-Compatible API**: Full compatibility with OpenAI's chat completion format
+- **OpenAI-Compatible API**: Full compatibility with OpenAI's API
 - **Provider Abstraction**: Clean trait-based design for multiple inference backends
 - **Production Ready**: 
   - Comprehensive error handling with structured JSON responses
@@ -13,6 +15,7 @@ A production-ready Rust-based inference server that provides a unified REST API 
   - Configurable timeouts, retries, and connection pooling
 - **Flexible Configuration**: Layered configuration system (defaults → YAML files → environment variables)
 - **Type Safety**: Strong typing throughout with separate internal and external data models
+- **Mock Provider**: Simulate responses from a model with timeouts and errors
 
 ## Architecture
 
@@ -52,6 +55,8 @@ The service uses a layered configuration approach:
 1. Default configuration (`config/default.yaml`)
 2. Environment-specific overrides (e.g., `config/production.yaml`)
 3. Environment variables (prefixed with `INFERENCE_`)
+
+See the [provider documentation](docs/providers.md) for more information on configuration options.
 
 ### Example Configuration
 
