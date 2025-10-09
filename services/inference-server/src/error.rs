@@ -1,8 +1,8 @@
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
-use crate::validations::ValidationError;
 use crate::providers::ProviderError;
+use crate::validations::ValidationError;
 
 #[derive(Serialize)]
 pub struct ErrorResponse {
@@ -29,15 +29,13 @@ impl IntoResponse for ApiError {
             ApiError::Provider(e) => {
                 // We need to implement IntoResponse for ProviderError
                 // For now, let's map it to appropriate HTTP status codes
-                use axum::http::StatusCode;
                 use axum::Json;
-                
+                use axum::http::StatusCode;
+
                 let (status, code, message) = match e {
-                    ProviderError::ConnectionFailed(msg) => (
-                        StatusCode::BAD_GATEWAY,
-                        "PROVIDER_CONNECTION_FAILED",
-                        msg,
-                    ),
+                    ProviderError::ConnectionFailed(msg) => {
+                        (StatusCode::BAD_GATEWAY, "PROVIDER_CONNECTION_FAILED", msg)
+                    }
                     ProviderError::InvalidResponse(msg) => (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "PROVIDER_INVALID_RESPONSE",
@@ -51,7 +49,7 @@ impl IntoResponse for ApiError {
                     ProviderError::ModelNotAvailable { requested, .. } => (
                         StatusCode::BAD_REQUEST,
                         "MODEL_NOT_AVAILABLE",
-                        format!("Model '{}' not available", requested),
+                        format!("Model '{requested}' not available"),
                     ),
                     ProviderError::Timeout => (
                         StatusCode::GATEWAY_TIMEOUT,
@@ -68,22 +66,24 @@ impl IntoResponse for ApiError {
                         "STREAMING_NOT_SUPPORTED",
                         "Streaming is not supported by this provider".to_string(),
                     ),
-                    ProviderError::ToolsNotSupported => (
+                    ProviderError::StreamError(msg) => {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "STREAM_ERROR", msg)
+                    }
+                    ProviderError::InvalidExtension { param, reason } => (
                         StatusCode::BAD_REQUEST,
-                        "TOOLS_NOT_SUPPORTED",
-                        "Tool/function calling is not supported by this provider".to_string(),
-                    ),
-                    ProviderError::StreamError(msg) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "STREAM_ERROR",
-                        msg,
+                        "INVALID_EXTENSION",
+                        format!("Invalid extension parameter '{param}': {reason}"),
                     ),
                 };
-                
-                (status, Json(ErrorResponse {
-                    error: message,
-                    code: code.to_string(),
-                })).into_response()
+
+                (
+                    status,
+                    Json(ErrorResponse {
+                        error: message,
+                        code: code.to_string(),
+                    }),
+                )
+                    .into_response()
             }
         }
     }

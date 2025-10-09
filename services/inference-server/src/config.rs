@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::Duration;
-
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Settings {
@@ -40,13 +39,11 @@ pub struct InferenceConfig {
 #[serde(tag = "provider", rename_all = "lowercase")]
 pub enum InferenceProvider {
     #[serde(rename = "lmstudio")]
-    LMStudio,  // No extra fields needed
-    
+    LMStudio, // No extra fields needed
+
     #[serde(rename = "triton")]
-    Triton {
-        model_version: String,
-    },
-    
+    Triton { model_version: String },
+
     #[serde(rename = "openai")]
     OpenAI {
         api_key: String,
@@ -199,16 +196,15 @@ fn default_rotation_policy() -> RotationPolicy {
     RotationPolicy::Daily
 }
 
-
 impl HttpConfigSchema {
     pub fn timeout(&self) -> Duration {
         Duration::from_secs(self.timeout_secs)
     }
-    
+
     pub fn connect_timeout(&self) -> Duration {
         Duration::from_secs(self.connect_timeout_secs)
     }
-    
+
     pub fn keep_alive(&self) -> Option<Duration> {
         self.keep_alive_secs.map(Duration::from_secs)
     }
@@ -234,31 +230,26 @@ impl InferenceConfig {
 impl Settings {
     pub fn new() -> Result<Self, config::ConfigError> {
         let config = config::Config::builder()
-        // Try both .yaml and .yml extensions
-        .add_source(
-            config::File::with_name("config/default")
-                .required(false)
-        )
-        
-        // Show what environment we're trying
-        .add_source(
-            config::File::with_name(&format!("config/{}", 
-                std::env::var("RUN_ENV").unwrap_or_else(|_| {
-                    println!("RUN_ENV not set, using 'development'");
-                    "development".to_string()
-                })
-            ))
-            .required(false)
-        )
-        
-        .add_source(
-            config::Environment::with_prefix("INFERENCE")
-                .separator("_")
-                .try_parsing(true)
-        )
-        
-        .build()?;
-    
-    config.try_deserialize()
+            // Try both .yaml and .yml extensions
+            .add_source(config::File::with_name("config/default").required(false))
+            // Show what environment we're trying
+            .add_source(
+                config::File::with_name(&format!(
+                    "config/{}",
+                    std::env::var("RUN_ENV").unwrap_or_else(|_| {
+                        println!("RUN_ENV not set, using 'development'");
+                        "development".to_string()
+                    })
+                ))
+                .required(false),
+            )
+            .add_source(
+                config::Environment::with_prefix("INFERENCE")
+                    .separator("_")
+                    .try_parsing(true),
+            )
+            .build()?;
+
+        config.try_deserialize()
     }
 }
