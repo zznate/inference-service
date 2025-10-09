@@ -1,6 +1,25 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ===== API-Facing Models (Full OpenAI Compatibility) =====
+
+/// Response mode determines whether provider-specific extensions are included in responses
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResponseMode {
+    /// Standard OpenAI-compatible response (default)
+    #[default]
+    Standard,
+    /// Extended response including provider-specific data
+    Extended,
+}
+
+/// Provider-specific extension data returned in extended mode
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ProviderExtensions {
+    pub provider: String,
+    pub data: HashMap<String, serde_json::Value>,
+}
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Message {
@@ -33,15 +52,26 @@ pub struct FunctionCall {
     pub arguments: String, // JSON string of arguments
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Default)]
 pub struct CompletionRequest {
+    #[serde(default)]
     pub messages: Vec<Message>,
     pub model: Option<String>,
-    
+
+    // Response mode for controlling extension inclusion
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_mode: Option<ResponseMode>,
+
+    // Provider-specific extension parameters
+    // Clients must explicitly nest provider-specific params under this key
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<HashMap<String, serde_json::Value>>,
+
     // Generation parameters
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f32>, // -2.0 to 2.0
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)] // TODO: Implement logit_bias support (token ID biasing)
     pub logit_bias: Option<serde_json::Map<String, serde_json::Value>>, // Token ID to bias
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<bool>, // Whether to return log probabilities
@@ -54,6 +84,7 @@ pub struct CompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>, // -2.0 to 2.0
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)] // TODO: Implement response_format support (JSON mode)
     pub response_format: Option<ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>, // For deterministic generation
@@ -65,19 +96,26 @@ pub struct CompletionRequest {
     pub temperature: Option<f32>, // 0.0 to 2.0
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>, // 0.0 to 1.0
-    
-    // Tool/Function calling
+
+    // Tool/Function calling (reserved for future implementation)
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)] // TODO: Implement tool/function calling support
     pub tools: Option<Vec<Tool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)] // TODO: Implement tool/function calling support
     pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)]
+    // TODO: Implement tool/function calling support (deprecated, but supported)
     pub functions: Option<Vec<Function>>, // Deprecated: use tools
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)]
+    // TODO: Implement tool/function calling support (deprecated, but supported)
     pub function_call: Option<FunctionCallOption>, // Deprecated: use tool_choice
-    
+
     // Additional options
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[allow(dead_code)] // TODO: Use for logging/metrics/abuse prevention
     pub user: Option<String>, // Unique identifier for end-user
 }
 
@@ -114,7 +152,7 @@ pub struct Function {
 #[serde(untagged)]
 pub enum ToolChoice {
     String(String), // "none", "auto", "required"
-    Object { 
+    Object {
         #[serde(rename = "type")]
         choice_type: String,
         function: ToolFunction,
@@ -146,6 +184,9 @@ pub struct CompletionResponse {
     pub usage: Option<Usage>, // Optional for compatibility with streaming
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_fingerprint: Option<String>,
+    /// Provider-specific extension data (only included in extended response mode)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_extensions: Option<ProviderExtensions>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -213,7 +254,7 @@ pub struct StreamChunk {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct StreamChoice {
     pub index: u32,
-    pub delta: Delta,  // Note: delta, not message for streaming
+    pub delta: Delta, // Note: delta, not message for streaming
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -293,8 +334,9 @@ impl Message {
             ..Default::default()
         }
     }
-    
+
     /// Create a tool response message
+    #[allow(dead_code)] // TODO: Will be used when tool calling is implemented
     pub fn tool_response(tool_call_id: &str, content: &str) -> Self {
         Self {
             role: "tool".to_string(),
@@ -307,6 +349,7 @@ impl Message {
 
 impl Choice {
     /// Create a simple non-streaming choice
+    #[allow(dead_code)] // Helper function for tests and examples
     pub fn simple(content: &str, finish_reason: &str) -> Self {
         Self {
             index: 0,
@@ -320,6 +363,7 @@ impl Choice {
 
 impl Usage {
     /// Create usage with all token counts
+    #[allow(dead_code)] // Helper function for tests and examples
     pub fn new(prompt: u32, completion: u32) -> Self {
         Self {
             prompt_tokens: Some(prompt),
