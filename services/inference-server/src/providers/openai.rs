@@ -122,9 +122,26 @@ impl OpenAIProvider {
         if let Some(seed) = request.seed {
             body["seed"] = serde_json::json!(seed);
         }
+        if let Some(ref user) = request.user {
+            body["user"] = serde_json::json!(user);
+        }
+        if let Some(n) = request.n {
+            body["n"] = serde_json::json!(n);
+        }
+        if let Some(ref response_format) = request.response_format {
+            body["response_format"] = serde_json::json!(response_format);
+        }
+        if let Some(ref logit_bias) = request.logit_bias {
+            body["logit_bias"] = serde_json::json!(logit_bias);
+        }
+        if let Some(logprobs) = request.logprobs {
+            body["logprobs"] = serde_json::json!(logprobs);
+        }
+        if let Some(top_logprobs) = request.top_logprobs {
+            body["top_logprobs"] = serde_json::json!(top_logprobs);
+        }
 
-        // Always set n=1 and stream=false for now
-        body["n"] = serde_json::json!(1);
+        // Always set stream=false for now (streaming handled separately)
         body["stream"] = serde_json::json!(false);
 
         body
@@ -257,6 +274,9 @@ impl InferenceProvider for OpenAIProvider {
             n: request.n,
             logprobs: request.logprobs,
             top_logprobs: request.top_logprobs,
+            user: request.user.clone(),
+            response_format: request.response_format.clone(),
+            logit_bias: request.logit_bias.clone(),
         })
     }
 
@@ -329,6 +349,109 @@ impl InferenceProvider for OpenAIProvider {
     ) -> CompletionResponse {
         // Use the standard helper function
         standard_completion_response(response, original_request, self.name())
+    }
+
+    /// Override generate to properly handle n > 1 completions
+    /// When n > 1, we need to return all choices, not just the first one
+    async fn generate(
+        &self,
+        request: &CompletionRequest,
+        model: &str,
+    ) -> Result<CompletionResponse, ProviderError> {
+        // Build inference request
+        let inference_req = self.build_inference_request(request, model)?;
+        let request_body = self.build_request_body(&inference_req);
+
+        debug!("Sending request to OpenAI: {}", request_body);
+
+        // Track request timing
+        let start = std::time::Instant::now();
+
+        // Execute HTTP request
+        let response = self
+            .client
+            .post(format!(
+                "{}/chat/completions",
+                self.settings.inference.base_url
+            ))
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| {
+                error!("Failed to send request to OpenAI: {}", e);
+                if e.is_timeout() {
+                    ProviderError::Timeout
+                } else if e.is_connect() {
+                    ProviderError::ConnectionFailed(format!("Connection failed: {e}"))
+                } else {
+                    ProviderError::RequestFailed {
+                        status: 0,
+                        message: e.to_string(),
+                    }
+                }
+            })?;
+
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        // Check HTTP status
+        let status = response.status();
+
+        // Get response body as JSON regardless of status
+        let response_body: serde_json::Value = response.json().await.map_err(|e| {
+            error!("Failed to parse OpenAI response: {}", e);
+            ProviderError::InvalidResponse(format!("Invalid JSON response: {e}"))
+        })?;
+
+        debug!("OpenAI response (status {}): {}", status, response_body);
+
+        // Parse as full CompletionResponse (handles all n choices)
+        if let Ok(completion_response) =
+            serde_json::from_value::<CompletionResponse>(response_body.clone())
+        {
+            // Add latency info if we want to track it
+            debug!("OpenAI request completed in {}ms with {} choices",
+                latency_ms, completion_response.choices.len());
+            return Ok(completion_response);
+        }
+
+        // Check if it's an error response
+        if let Some(error) = response_body.get("error") {
+            let error_message = error
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error");
+            let error_type = error
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("unknown");
+            let error_code = error.get("code").and_then(|c| c.as_str());
+
+            return match error_type {
+                "insufficient_quota" | "rate_limit_exceeded" => Err(ProviderError::RequestFailed {
+                    status: 429,
+                    message: format!("OpenAI API error: {error_message}"),
+                }),
+                "model_not_found" => Err(ProviderError::ModelNotAvailable {
+                    requested: self.extract_model_from_error(error_message),
+                    available: vec![],
+                }),
+                "invalid_api_key" | "invalid_organization" => Err(ProviderError::Configuration(
+                    format!("Authentication error: {error_message}"),
+                )),
+                _ => Err(ProviderError::RequestFailed {
+                    status: 500,
+                    message: format!(
+                        "OpenAI API error ({}): {}",
+                        error_code.unwrap_or(error_type),
+                        error_message
+                    ),
+                }),
+            };
+        }
+
+        Err(ProviderError::InvalidResponse(
+            "Unexpected response format from OpenAI".to_string(),
+        ))
     }
 
     fn name(&self) -> &str {
@@ -487,7 +610,7 @@ impl InferenceProvider for OpenAIProvider {
         // Parse SSE stream from OpenAI using correct API
         let bytes_stream = response
             .bytes_stream()
-            .map_err(|e| std::io::Error::other(e));
+            .map_err(std::io::Error::other);
 
         let sse_stream = bytes_stream
             .eventsource()
@@ -583,6 +706,9 @@ mod tests {
             n: None,
             logprobs: None,
             top_logprobs: None,
+            user: None,
+            response_format: None,
+            logit_bias: None,
         };
 
         let body = provider.build_request_body(&request);
@@ -594,7 +720,8 @@ mod tests {
         assert!((body["frequency_penalty"].as_f64().unwrap() - 0.5).abs() < 0.001);
         assert_eq!(body["stop"], serde_json::json!(["STOP"]));
         assert_eq!(body["seed"], 42);
-        assert_eq!(body["n"], 1);
+        // n should not be set if not provided in request
+        assert!(body.get("n").is_none());
         assert_eq!(body["stream"], false);
     }
 
@@ -620,5 +747,66 @@ mod tests {
             }
             _ => panic!("Expected RequestFailed error"),
         }
+    }
+
+    #[test]
+    fn test_build_request_body_with_n_completions() {
+        let provider = OpenAIProvider::new(create_test_settings()).unwrap();
+
+        let request = InferenceRequest {
+            messages: vec![Message::new("user", "Hello")],
+            model: "gpt-3.5-turbo".to_string(),
+            max_tokens: Some(100),
+            temperature: Some(0.7),
+            n: Some(3), // Request 3 completions
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop_sequences: None,
+            seed: None,
+            stream: None,
+            logprobs: None,
+            top_logprobs: None,
+            user: None,
+            response_format: None,
+            logit_bias: None,
+        };
+
+        let body = provider.build_request_body(&request);
+
+        assert_eq!(body["model"], "gpt-3.5-turbo");
+        assert_eq!(body["max_tokens"], 100);
+        assert_eq!(body["n"], 3); // Verify n is set to 3
+        assert!((body["temperature"].as_f64().unwrap() - 0.7).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_build_request_body_with_logprobs() {
+        let provider = OpenAIProvider::new(create_test_settings()).unwrap();
+
+        let request = InferenceRequest {
+            messages: vec![Message::new("user", "Hello")],
+            model: "gpt-3.5-turbo".to_string(),
+            max_tokens: Some(100),
+            temperature: Some(0.7),
+            logprobs: Some(true),
+            top_logprobs: Some(5),
+            n: None,
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            stop_sequences: None,
+            seed: None,
+            stream: None,
+            user: None,
+            response_format: None,
+            logit_bias: None,
+        };
+
+        let body = provider.build_request_body(&request);
+
+        assert_eq!(body["model"], "gpt-3.5-turbo");
+        assert_eq!(body["logprobs"], true);
+        assert_eq!(body["top_logprobs"], 5);
     }
 }

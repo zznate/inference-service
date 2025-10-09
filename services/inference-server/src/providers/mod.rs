@@ -29,12 +29,20 @@ pub struct InferenceRequest {
     pub seed: Option<u64>,
     #[allow(dead_code)] // TODO: Implement streaming at InferenceRequest level
     pub stream: Option<bool>,
-    #[allow(dead_code)] // TODO: Implement n-completions (multiple choices per request)
-    pub n: Option<u32>,
+    pub n: Option<u32>, // Number of completions to generate
     #[allow(dead_code)] // TODO: Implement logprobs support
     pub logprobs: Option<bool>,
     #[allow(dead_code)] // TODO: Implement logprobs support
     pub top_logprobs: Option<u8>,
+
+    // User tracking
+    pub user: Option<String>, // Unique identifier for end-user
+
+    // Response formatting
+    pub response_format: Option<crate::models::ResponseFormat>, // JSON mode control
+
+    // Token biasing
+    pub logit_bias: Option<serde_json::Map<String, serde_json::Value>>, // Token ID to bias value (-100 to 100)
 }
 
 /// Normalized response format that all providers return
