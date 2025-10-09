@@ -16,6 +16,8 @@ pub enum ValidationError {
     InvalidN(u32),
     ModelNotInAllowedList { model: String, allowed: Vec<String> },
     StreamingNotSupported,
+    InvalidResponseFormat(String),
+    InvalidLogitBias { token_id: String, reason: String },
 }
 
 impl IntoResponse for ValidationError {
@@ -79,6 +81,16 @@ impl IntoResponse for ValidationError {
                 StatusCode::BAD_REQUEST,
                 "STREAMING_NOT_SUPPORTED",
                 "Streaming is not supported by the current provider".to_string(),
+            ),
+            ValidationError::InvalidResponseFormat(format_type) => (
+                StatusCode::BAD_REQUEST,
+                "INVALID_RESPONSE_FORMAT",
+                format!("Response format type must be 'text' or 'json_object', got '{format_type}'"),
+            ),
+            ValidationError::InvalidLogitBias { token_id, reason } => (
+                StatusCode::BAD_REQUEST,
+                "INVALID_LOGIT_BIAS",
+                format!("Invalid logit bias for token '{token_id}': {reason}"),
             ),
         };
 
@@ -153,6 +165,42 @@ pub fn validate_completion_request(request: &CompletionRequest) -> Result<(), Va
     if let Some(n) = request.n {
         if n == 0 || n > 10 {
             return Err(ValidationError::InvalidN(n));
+        }
+    }
+
+    // Validate response_format
+    if let Some(ref response_format) = request.response_format {
+        let format_type = &response_format.format_type;
+        if format_type != "text" && format_type != "json_object" {
+            return Err(ValidationError::InvalidResponseFormat(format_type.clone()));
+        }
+    }
+
+    // Validate logit_bias
+    if let Some(ref logit_bias) = request.logit_bias {
+        for (token_id, bias_value) in logit_bias {
+            // Validate token ID is numeric
+            if token_id.parse::<i64>().is_err() {
+                return Err(ValidationError::InvalidLogitBias {
+                    token_id: token_id.clone(),
+                    reason: "token ID must be a numeric string".to_string(),
+                });
+            }
+
+            // Validate bias value is a number between -100 and 100
+            if let Some(bias) = bias_value.as_f64() {
+                if !(-100.0..=100.0).contains(&bias) {
+                    return Err(ValidationError::InvalidLogitBias {
+                        token_id: token_id.clone(),
+                        reason: format!("bias value must be between -100 and 100, got {bias}"),
+                    });
+                }
+            } else {
+                return Err(ValidationError::InvalidLogitBias {
+                    token_id: token_id.clone(),
+                    reason: "bias value must be a number".to_string(),
+                });
+            }
         }
     }
 

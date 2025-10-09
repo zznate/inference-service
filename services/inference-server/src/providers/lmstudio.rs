@@ -284,6 +284,24 @@ impl LMStudioProvider {
         if let Some(seed) = request.seed {
             body["seed"] = serde_json::json!(seed);
         }
+        if let Some(ref user) = request.user {
+            body["user"] = serde_json::json!(user);
+        }
+        if let Some(n) = request.n {
+            body["n"] = serde_json::json!(n);
+        }
+        if let Some(ref response_format) = request.response_format {
+            body["response_format"] = serde_json::json!(response_format);
+        }
+        if let Some(ref logit_bias) = request.logit_bias {
+            body["logit_bias"] = serde_json::json!(logit_bias);
+        }
+        if let Some(logprobs) = request.logprobs {
+            body["logprobs"] = serde_json::json!(logprobs);
+        }
+        if let Some(top_logprobs) = request.top_logprobs {
+            body["top_logprobs"] = serde_json::json!(top_logprobs);
+        }
 
         // Merge validated extensions if present
         if let Some(exts) = extensions {
@@ -416,6 +434,9 @@ impl InferenceProvider for LMStudioProvider {
             n: request.n,
             logprobs: request.logprobs,
             top_logprobs: request.top_logprobs,
+            user: request.user.clone(),
+            response_format: request.response_format.clone(),
+            logit_bias: request.logit_bias.clone(),
         })
     }
 
@@ -652,10 +673,16 @@ impl InferenceProvider for LMStudioProvider {
 
         debug!("LM Studio response: {}", response_body);
 
-        // Parse into our internal format
-        let inference_resp = self.parse_response_body(response_body, model)?;
+        // Parse as full CompletionResponse (handles all n choices)
+        if let Ok(completion_response) =
+            serde_json::from_value::<CompletionResponse>(response_body.clone())
+        {
+            debug!("LM Studio request completed with {} choices", completion_response.choices.len());
+            return Ok(completion_response);
+        }
 
-        // Build completion response
+        // If parsing as CompletionResponse fails, try as error or use parse_response_body for single choice
+        let inference_resp = self.parse_response_body(response_body, model)?;
         Ok(self.build_completion_response(&inference_resp, request))
     }
 
@@ -727,7 +754,7 @@ impl InferenceProvider for LMStudioProvider {
         // Convert response to byte stream
         let bytes_stream = response
             .bytes_stream()
-            .map_err(|e| std::io::Error::other(e));
+            .map_err(std::io::Error::other);
 
         // Parse SSE events from LM Studio using correct API
         let sse_stream = bytes_stream

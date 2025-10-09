@@ -255,6 +255,9 @@ impl InferenceProvider for MockProvider {
             n: request.n,
             logprobs: request.logprobs,
             top_logprobs: request.top_logprobs,
+            user: request.user.clone(),
+            response_format: request.response_format.clone(),
+            logit_bias: request.logit_bias.clone(),
         })
     }
 

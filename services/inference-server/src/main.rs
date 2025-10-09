@@ -124,6 +124,7 @@ fn create_provider(
     message_count = request.messages.len(),
     model = request.model.as_deref().unwrap_or("default"),
     stream = request.stream.unwrap_or(false),
+    user = request.user.as_deref(),
 ))]
 async fn generate_completion(
     State(state): State<AppState>,

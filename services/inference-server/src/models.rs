@@ -71,8 +71,7 @@ pub struct CompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f32>, // -2.0 to 2.0
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[allow(dead_code)] // TODO: Implement logit_bias support (token ID biasing)
-    pub logit_bias: Option<serde_json::Map<String, serde_json::Value>>, // Token ID to bias
+    pub logit_bias: Option<serde_json::Map<String, serde_json::Value>>, // Token ID to bias (-100 to 100)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<bool>, // Whether to return log probabilities
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,7 +83,6 @@ pub struct CompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>, // -2.0 to 2.0
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[allow(dead_code)] // TODO: Implement response_format support (JSON mode)
     pub response_format: Option<ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>, // For deterministic generation
@@ -115,8 +113,7 @@ pub struct CompletionRequest {
 
     // Additional options
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[allow(dead_code)] // TODO: Use for logging/metrics/abuse prevention
-    pub user: Option<String>, // Unique identifier for end-user
+    pub user: Option<String>, // Unique identifier for end-user (for logging/metrics/abuse prevention)
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
