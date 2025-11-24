@@ -249,7 +249,31 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 
 ## Error Handling
 
-The service provides structured error responses with appropriate HTTP status codes:
+The service provides **OpenAI-compatible error responses** for full compatibility with OpenAI SDKs and clients. All errors follow the standard OpenAI format with appropriate HTTP status codes.
+
+### Error Response Format
+
+All errors use the OpenAI API format:
+
+```json
+{
+  "error": {
+    "message": "Human-readable error description",
+    "type": "error_type_identifier",
+    "param": "parameter_name_if_applicable",
+    "code": "specific_error_code_if_applicable"
+  }
+}
+```
+
+### Error Types
+
+- **invalid_request_error** (400): Malformed request or invalid parameters
+- **authentication_error** (401): Invalid API key
+- **permission_error** (403): Insufficient permissions or quota
+- **rate_limit_error** (429): Too many requests
+- **api_error** (500/502): Server-side or provider errors
+- **timeout_error** (504): Request timeout
 
 ### Validation Error Example
 
@@ -257,13 +281,39 @@ The service provides structured error responses with appropriate HTTP status cod
 curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "messages": []
+    "messages": [],
+    "model": "gpt-3.5-turbo"
   }'
 
 # Response (400 Bad Request)
 {
-  "error": "Messages array cannot be empty",
-  "code": "EMPTY_MESSAGES"
+  "error": {
+    "message": "Messages array cannot be empty",
+    "type": "invalid_request_error",
+    "param": "messages",
+    "code": null
+  }
+}
+```
+
+### Invalid Parameter Example
+
+```bash
+curl -X POST http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "Hello"}],
+    "temperature": 3.0
+  }'
+
+# Response (400 Bad Request)
+{
+  "error": {
+    "message": "Temperature must be between 0.0 and 2.0, got 3.0",
+    "type": "invalid_request_error",
+    "param": "temperature",
+    "code": null
+  }
 }
 ```
 
@@ -273,21 +323,25 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-4",
+    "model": "gpt-5",
     "messages": [{"role": "user", "content": "Hello"}]
   }'
 
 # Response (400 Bad Request)
 {
-  "error": "Model 'gpt-4' is not in the allowed list. Available models: gpt-oss-20b, llama-2-7b",
-  "code": "MODEL_NOT_ALLOWED"
+  "error": {
+    "message": "Model 'gpt-5' is not in the allowed list. Available models: gpt-3.5-turbo, gpt-4",
+    "type": "invalid_request_error",
+    "param": "model",
+    "code": "model_not_found"
+  }
 }
 ```
 
 ### Provider Error Example
 
 ```bash
-# When LM Studio is not running
+# When provider is not available
 curl -X POST http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -296,10 +350,30 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 
 # Response (502 Bad Gateway)
 {
-  "error": "Connection failed: error sending request",
-  "code": "PROVIDER_CONNECTION_FAILED"
+  "error": {
+    "message": "Failed to connect to inference provider: Connection refused",
+    "type": "api_error",
+    "param": null,
+    "code": "provider_connection_failed"
+  }
 }
 ```
+
+### Timeout Error Example
+
+```bash
+# Response (504 Gateway Timeout)
+{
+  "error": {
+    "message": "Request to inference provider timed out",
+    "type": "timeout_error",
+    "param": null,
+    "code": "provider_timeout"
+  }
+}
+```
+
+For complete error handling documentation, see [Error Handling Guide](docs/error-handling.md).
 
 ## Testing
 

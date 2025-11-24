@@ -171,26 +171,34 @@ async fn generate_completion(
                             Ok(json) => Ok(Event::default().data(json)),
                             Err(e) => {
                                 tracing::error!("Failed to serialize chunk: {}", e);
-                                // Send error event instead of failing silently
-                                let error = serde_json::json!({
-                                    "error": {
-                                        "message": format!("Serialization error: {}", e),
-                                        "type": "stream_error"
+                                // Send OpenAI-compatible error event
+                                let error_response = models::OpenAIErrorResponse {
+                                    error: models::OpenAIError {
+                                        message: format!("Serialization error: {}", e),
+                                        error_type: "api_error".to_string(),
+                                        param: None,
+                                        code: Some("stream_serialization_error".to_string()),
                                     }
-                                });
-                                Ok(Event::default().data(error.to_string()))
+                                };
+                                let error_json = serde_json::to_string(&error_response)
+                                    .unwrap_or_else(|_| r#"{"error":{"message":"Stream error","type":"api_error"}}"#.to_string());
+                                Ok(Event::default().data(error_json))
                             }
                         }
                     }
                     Err(e) => {
-                        // Send error in stream
-                        let error = serde_json::json!({
-                            "error": {
-                                "message": e.to_string(),
-                                "type": "stream_error"
+                        // Send OpenAI-compatible error in stream
+                        let error_response = models::OpenAIErrorResponse {
+                            error: models::OpenAIError {
+                                message: e.to_string(),
+                                error_type: "api_error".to_string(),
+                                param: None,
+                                code: Some("stream_error".to_string()),
                             }
-                        });
-                        Ok(Event::default().data(error.to_string()))
+                        };
+                        let error_json = serde_json::to_string(&error_response)
+                            .unwrap_or_else(|_| r#"{"error":{"message":"Stream error","type":"api_error"}}"#.to_string());
+                        Ok(Event::default().data(error_json))
                     }
                 }
             })

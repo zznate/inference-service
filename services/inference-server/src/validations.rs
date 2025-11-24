@@ -1,5 +1,4 @@
-use crate::error::ErrorResponse;
-use crate::models::CompletionRequest;
+use crate::models::{CompletionRequest, OpenAIError, OpenAIErrorResponse};
 use axum::{Json, http::StatusCode, response::IntoResponse, response::Response};
 use std::collections::HashSet;
 
@@ -20,86 +19,111 @@ pub enum ValidationError {
     InvalidLogitBias { token_id: String, reason: String },
 }
 
-impl IntoResponse for ValidationError {
-    fn into_response(self) -> Response {
-        let (status, error_code, message) = match self {
-            ValidationError::EmptyMessages => (
-                StatusCode::BAD_REQUEST,
-                "EMPTY_MESSAGES",
-                "Messages array cannot be empty".to_string(),
-            ),
-            ValidationError::NoContent => (
-                StatusCode::BAD_REQUEST,
-                "NO_CONTENT",
-                "At least one message must have content or tool calls".to_string(),
-            ),
-            ValidationError::InvalidMaxTokens(max_tokens) => (
-                StatusCode::BAD_REQUEST,
-                "INVALID_MAX_TOKENS",
-                format!("Max tokens must be between 1 and 128000, got {max_tokens}"),
-            ),
-            ValidationError::InvalidTemperature(temperature) => (
-                StatusCode::BAD_REQUEST,
-                "INVALID_TEMPERATURE",
-                format!("Temperature must be between 0.0 and 2.0, got {temperature}"),
-            ),
-            ValidationError::InvalidTopP(top_p) => (
-                StatusCode::BAD_REQUEST,
-                "INVALID_TOP_P",
-                format!("Top-p must be between 0.0 and 1.0, got {top_p}"),
-            ),
-            ValidationError::InvalidFrequencyPenalty(penalty) => (
-                StatusCode::BAD_REQUEST,
-                "INVALID_FREQUENCY_PENALTY",
-                format!("Frequency penalty must be between -2.0 and 2.0, got {penalty}"),
-            ),
-            ValidationError::InvalidPresencePenalty(penalty) => (
-                StatusCode::BAD_REQUEST,
-                "INVALID_PRESENCE_PENALTY",
-                format!("Presence penalty must be between -2.0 and 2.0, got {penalty}"),
-            ),
-            ValidationError::InvalidTopLogprobs(n) => (
-                StatusCode::BAD_REQUEST,
-                "INVALID_TOP_LOGPROBS",
-                format!("Top logprobs must be between 0 and 20, got {n}"),
-            ),
-            ValidationError::InvalidN(n) => (
-                StatusCode::BAD_REQUEST,
-                "INVALID_N",
-                format!("N (number of choices) must be between 1 and 10, got {n}"),
-            ),
-            ValidationError::ModelNotInAllowedList { model, allowed } => (
-                StatusCode::BAD_REQUEST,
-                "MODEL_NOT_ALLOWED",
-                format!(
+impl ValidationError {
+    pub fn status_code(&self) -> StatusCode {
+        // All validation errors return 400 Bad Request
+        StatusCode::BAD_REQUEST
+    }
+
+    pub fn to_openai_error(&self) -> OpenAIError {
+        match self {
+            ValidationError::EmptyMessages => OpenAIError {
+                message: "Messages array cannot be empty".to_string(),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("messages".to_string()),
+                code: None,
+            },
+            ValidationError::NoContent => OpenAIError {
+                message: "At least one message must have content or tool calls".to_string(),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("messages".to_string()),
+                code: None,
+            },
+            ValidationError::InvalidMaxTokens(max_tokens) => OpenAIError {
+                message: format!("Max tokens must be between 1 and 128000, got {}", max_tokens),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("max_tokens".to_string()),
+                code: None,
+            },
+            ValidationError::InvalidTemperature(temperature) => OpenAIError {
+                message: format!("Temperature must be between 0.0 and 2.0, got {}", temperature),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("temperature".to_string()),
+                code: None,
+            },
+            ValidationError::InvalidTopP(top_p) => OpenAIError {
+                message: format!("Top-p must be between 0.0 and 1.0, got {}", top_p),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("top_p".to_string()),
+                code: None,
+            },
+            ValidationError::InvalidFrequencyPenalty(penalty) => OpenAIError {
+                message: format!("Frequency penalty must be between -2.0 and 2.0, got {}", penalty),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("frequency_penalty".to_string()),
+                code: None,
+            },
+            ValidationError::InvalidPresencePenalty(penalty) => OpenAIError {
+                message: format!("Presence penalty must be between -2.0 and 2.0, got {}", penalty),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("presence_penalty".to_string()),
+                code: None,
+            },
+            ValidationError::InvalidTopLogprobs(n) => OpenAIError {
+                message: format!("Top logprobs must be between 0 and 20, got {}", n),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("top_logprobs".to_string()),
+                code: None,
+            },
+            ValidationError::InvalidN(n) => OpenAIError {
+                message: format!("N (number of choices) must be between 1 and 10, got {}", n),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("n".to_string()),
+                code: None,
+            },
+            ValidationError::ModelNotInAllowedList { model, allowed } => OpenAIError {
+                message: format!(
                     "Model '{}' is not in the allowed list. Available models: {}",
                     model,
                     allowed.join(", ")
                 ),
-            ),
-            ValidationError::StreamingNotSupported => (
-                StatusCode::BAD_REQUEST,
-                "STREAMING_NOT_SUPPORTED",
-                "Streaming is not supported by the current provider".to_string(),
-            ),
-            ValidationError::InvalidResponseFormat(format_type) => (
-                StatusCode::BAD_REQUEST,
-                "INVALID_RESPONSE_FORMAT",
-                format!("Response format type must be 'text' or 'json_object', got '{format_type}'"),
-            ),
-            ValidationError::InvalidLogitBias { token_id, reason } => (
-                StatusCode::BAD_REQUEST,
-                "INVALID_LOGIT_BIAS",
-                format!("Invalid logit bias for token '{token_id}': {reason}"),
-            ),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("model".to_string()),
+                code: Some("model_not_found".to_string()),
+            },
+            ValidationError::StreamingNotSupported => OpenAIError {
+                message: "Streaming is not supported by the current provider".to_string(),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("stream".to_string()),
+                code: Some("unsupported_parameter".to_string()),
+            },
+            ValidationError::InvalidResponseFormat(format_type) => OpenAIError {
+                message: format!(
+                    "Response format type must be 'text' or 'json_object', got '{}'",
+                    format_type
+                ),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("response_format".to_string()),
+                code: None,
+            },
+            ValidationError::InvalidLogitBias { token_id, reason } => OpenAIError {
+                message: format!("Invalid logit bias for token '{}': {}", token_id, reason),
+                error_type: "invalid_request_error".to_string(),
+                param: Some("logit_bias".to_string()),
+                code: None,
+            },
+        }
+    }
+}
+
+impl IntoResponse for ValidationError {
+    fn into_response(self) -> Response {
+        let status = self.status_code();
+        let error_response = OpenAIErrorResponse {
+            error: self.to_openai_error(),
         };
 
-        let body = Json(ErrorResponse {
-            error: message,
-            code: error_code.to_string(),
-        });
-
-        (status, body).into_response()
+        (status, Json(error_response)).into_response()
     }
 }
 
@@ -334,5 +358,105 @@ mod tests {
             result,
             Err(ValidationError::StreamingNotSupported)
         ));
+    }
+
+    // OpenAI error format tests
+    #[test]
+    fn test_validation_error_to_openai_format() {
+        let error = ValidationError::InvalidTemperature(3.0);
+        let openai_error = error.to_openai_error();
+
+        assert_eq!(openai_error.error_type, "invalid_request_error");
+        assert_eq!(openai_error.param, Some("temperature".to_string()));
+        assert!(openai_error.message.contains("3"));
+        assert!(openai_error.message.contains("0"));
+        assert!(openai_error.message.contains("2"));
+    }
+
+    #[test]
+    fn test_empty_messages_openai_error() {
+        let error = ValidationError::EmptyMessages;
+        let openai_error = error.to_openai_error();
+
+        assert_eq!(openai_error.error_type, "invalid_request_error");
+        assert_eq!(openai_error.param, Some("messages".to_string()));
+        assert_eq!(openai_error.code, None);
+    }
+
+    #[test]
+    fn test_model_not_allowed_openai_error() {
+        let error = ValidationError::ModelNotInAllowedList {
+            model: "gpt-5".to_string(),
+            allowed: vec!["gpt-3.5-turbo".to_string(), "gpt-4".to_string()],
+        };
+        let openai_error = error.to_openai_error();
+
+        assert_eq!(openai_error.error_type, "invalid_request_error");
+        assert_eq!(openai_error.param, Some("model".to_string()));
+        assert_eq!(openai_error.code, Some("model_not_found".to_string()));
+        assert!(openai_error.message.contains("gpt-5"));
+    }
+
+    #[test]
+    fn test_streaming_not_supported_openai_error() {
+        let error = ValidationError::StreamingNotSupported;
+        let openai_error = error.to_openai_error();
+
+        assert_eq!(openai_error.error_type, "invalid_request_error");
+        assert_eq!(openai_error.param, Some("stream".to_string()));
+        assert_eq!(openai_error.code, Some("unsupported_parameter".to_string()));
+    }
+
+    #[test]
+    fn test_invalid_max_tokens_openai_error() {
+        let error = ValidationError::InvalidMaxTokens(200000);
+        let openai_error = error.to_openai_error();
+
+        assert_eq!(openai_error.error_type, "invalid_request_error");
+        assert_eq!(openai_error.param, Some("max_tokens".to_string()));
+        assert!(openai_error.message.contains("200000"));
+    }
+
+    #[test]
+    fn test_invalid_top_p_openai_error() {
+        let error = ValidationError::InvalidTopP(1.5);
+        let openai_error = error.to_openai_error();
+
+        assert_eq!(openai_error.error_type, "invalid_request_error");
+        assert_eq!(openai_error.param, Some("top_p".to_string()));
+        assert!(openai_error.message.contains("1.5"));
+    }
+
+    #[test]
+    fn test_invalid_n_openai_error() {
+        let error = ValidationError::InvalidN(15);
+        let openai_error = error.to_openai_error();
+
+        assert_eq!(openai_error.error_type, "invalid_request_error");
+        assert_eq!(openai_error.param, Some("n".to_string()));
+        assert!(openai_error.message.contains("15"));
+    }
+
+    #[test]
+    fn test_invalid_logit_bias_openai_error() {
+        let error = ValidationError::InvalidLogitBias {
+            token_id: "12345".to_string(),
+            reason: "Value out of range".to_string(),
+        };
+        let openai_error = error.to_openai_error();
+
+        assert_eq!(openai_error.error_type, "invalid_request_error");
+        assert_eq!(openai_error.param, Some("logit_bias".to_string()));
+        assert!(openai_error.message.contains("12345"));
+        assert!(openai_error.message.contains("Value out of range"));
+    }
+
+    #[test]
+    fn test_validation_error_status_code() {
+        let error = ValidationError::InvalidTemperature(3.0);
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
+
+        let error = ValidationError::EmptyMessages;
+        assert_eq!(error.status_code(), StatusCode::BAD_REQUEST);
     }
 }
