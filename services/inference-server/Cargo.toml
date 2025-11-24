@@ -21,6 +21,7 @@ config = "0.15"
 uuid = { version = "1.2", features = ["v7"] }
 async-trait = "0.1"
 rand = "0.9"
+url = "2.5"
 tempfile = { version = "3", features = [], default-features = false }  # For tests only
 # Streaming support
 futures-util = "0.3"

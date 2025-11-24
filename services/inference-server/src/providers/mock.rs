@@ -60,6 +60,8 @@ struct MockResponse {
 struct MockSettings {
     #[serde(default = "default_mode")]
     mode: ResponseMode,
+    #[serde(default = "default_chunk_delay_ms")]
+    chunk_delay_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -82,10 +84,15 @@ fn default_mode() -> ResponseMode {
     ResponseMode::First
 }
 
+fn default_chunk_delay_ms() -> u64 {
+    50 // Default 50ms between chunks
+}
+
 impl Default for MockSettings {
     fn default() -> Self {
         Self {
             mode: default_mode(),
+            chunk_delay_ms: default_chunk_delay_ms(),
         }
     }
 }
@@ -135,20 +142,23 @@ impl MockProvider {
 
     /// Extract scenario name from model name (strip "mock-" prefix)
     fn extract_scenario(&self, model: &str) -> Result<String, ProviderError> {
-        if !model.starts_with("mock-") {
-            return Err(ProviderError::Configuration(format!(
-                "Mock provider requires model names starting with 'mock-', got: {model}"
-            )));
-        }
-
-        Ok(model.strip_prefix("mock-").unwrap().to_string())
+        model
+            .strip_prefix("mock-")
+            .ok_or_else(|| {
+                ProviderError::Configuration(format!(
+                    "Mock provider requires model names starting with 'mock-', got: {model}"
+                ))
+            })
+            .map(|s| s.to_string())
     }
 
     /// Load responses from YAML file
-    fn load_responses(&self, scenario: &str) -> Result<MockResponseFile, ProviderError> {
+    async fn load_responses(&self, scenario: &str) -> Result<MockResponseFile, ProviderError> {
         // Check cache first
         {
-            let cache = self.response_cache.lock().unwrap();
+            let cache = self.response_cache.lock().map_err(|e| {
+                ProviderError::Configuration(format!("Lock poisoned: {}", e))
+            })?;
             if let Some(responses) = cache.get(scenario) {
                 debug!("Using cached responses for scenario: {}", scenario);
                 return Ok(responses.clone());
@@ -163,7 +173,7 @@ impl MockProvider {
             let default_path = self.responses_dir().join("default.yaml");
             if default_path.exists() {
                 warn!("Scenario '{}' not found, using default.yaml", scenario);
-                return self.load_file(&default_path, "default");
+                return self.load_file(&default_path, "default").await;
             }
 
             return Err(ProviderError::Configuration(format!(
@@ -171,12 +181,12 @@ impl MockProvider {
             )));
         }
 
-        self.load_file(&file_path, scenario)
+        self.load_file(&file_path, scenario).await
     }
 
     /// Load and parse a YAML file
-    fn load_file(&self, path: &Path, scenario: &str) -> Result<MockResponseFile, ProviderError> {
-        let contents = std::fs::read_to_string(path).map_err(|e| {
+    async fn load_file(&self, path: &Path, scenario: &str) -> Result<MockResponseFile, ProviderError> {
+        let contents = tokio::fs::read_to_string(path).await.map_err(|e| {
             ProviderError::Configuration(format!("Failed to read mock file {path:?}: {e}"))
         })?;
 
@@ -192,7 +202,9 @@ impl MockProvider {
 
         // Cache the loaded responses
         {
-            let mut cache = self.response_cache.lock().unwrap();
+            let mut cache = self.response_cache.lock().map_err(|e| {
+                ProviderError::Configuration(format!("Lock poisoned: {}", e))
+            })?;
             cache.insert(scenario.to_string(), response_file.clone());
         }
 
@@ -273,7 +285,7 @@ impl InferenceProvider for MockProvider {
         let scenario = self.extract_scenario(&request.model)?;
 
         // Load responses for this scenario
-        let response_file = self.load_responses(&scenario)?;
+        let response_file = self.load_responses(&scenario).await?;
 
         // Select a response based on mode
         let mock_response = self.select_response(&response_file, &scenario);
@@ -339,15 +351,13 @@ impl InferenceProvider for MockProvider {
         // List all available mock scenarios
         let mut models = Vec::new();
 
-        let entries = std::fs::read_dir(self.responses_dir()).map_err(|e| {
+        let mut entries = tokio::fs::read_dir(self.responses_dir()).await.map_err(|e| {
             ProviderError::Configuration(format!("Failed to read mock responses directory: {e}"))
         })?;
 
-        for entry in entries {
-            let entry = entry.map_err(|e| {
-                ProviderError::Configuration(format!("Failed to read directory entry: {e}"))
-            })?;
-
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            ProviderError::Configuration(format!("Failed to read directory entry: {e}"))
+        })? {
             let path = entry.path();
             if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("yaml") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -388,7 +398,7 @@ impl InferenceProvider for MockProvider {
         // Reuse existing logic to get the mock response
         let inference_req = self.build_inference_request(request, model)?;
         let scenario = self.extract_scenario(&inference_req.model)?;
-        let response_file = self.load_responses(&scenario)?;
+        let response_file = self.load_responses(&scenario).await?;
         let mock_response = self.select_response(&response_file, &scenario);
 
         // Generate a unique request ID for this stream
@@ -408,15 +418,19 @@ impl InferenceProvider for MockProvider {
             mock_response.total_tokens,
         );
 
+        // Get chunk delay from settings or response-specific delay
+        let chunk_delay = mock_response.delay_ms.unwrap_or(response_file.settings.chunk_delay_ms);
+
         // Create stream that yields chunks with delay
         let chunks_stream = stream::iter(tokens.into_iter().enumerate()).then(move |(i, token)| {
             let chunk_id = request_id.clone();
             let chunk_model = model_name.clone();
-            let base_delay = mock_response.delay_ms.unwrap_or(50);
 
             async move {
                 // Simulate realistic token generation delay
-                tokio::time::sleep(Duration::from_millis(base_delay)).await;
+                if chunk_delay > 0 {
+                    tokio::time::sleep(Duration::from_millis(chunk_delay)).await;
+                }
 
                 if i == 0 {
                     // First chunk includes role
@@ -529,7 +543,7 @@ settings:
 
         let provider =
             MockProvider::new(create_test_settings(temp_dir.path().to_path_buf())).unwrap();
-        let response_file = provider.load_responses("test").unwrap();
+        let response_file = provider.load_responses("test").await.unwrap();
 
         assert_eq!(response_file.responses.len(), 1);
         assert_eq!(response_file.responses[0].text, "Test response");

@@ -167,8 +167,20 @@ async fn generate_completion(
                 match chunk_result {
                     Ok(chunk) => {
                         // Format as SSE: "data: {json}\n\n"
-                        let json = serde_json::to_string(&chunk).unwrap_or_default();
-                        Ok(Event::default().data(json))
+                        match serde_json::to_string(&chunk) {
+                            Ok(json) => Ok(Event::default().data(json)),
+                            Err(e) => {
+                                tracing::error!("Failed to serialize chunk: {}", e);
+                                // Send error event instead of failing silently
+                                let error = serde_json::json!({
+                                    "error": {
+                                        "message": format!("Serialization error: {}", e),
+                                        "type": "stream_error"
+                                    }
+                                });
+                                Ok(Event::default().data(error.to_string()))
+                            }
+                        }
                     }
                     Err(e) => {
                         // Send error in stream

@@ -250,6 +250,59 @@ impl Settings {
             )
             .build()?;
 
-        config.try_deserialize()
+        let settings: Self = config.try_deserialize()?;
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    /// Validate configuration settings
+    pub fn validate(&self) -> Result<(), config::ConfigError> {
+        // Validate base_url is a valid URL
+        if let Err(e) = url::Url::parse(&self.inference.base_url) {
+            return Err(config::ConfigError::Message(
+                format!("Invalid base_url '{}': {}", self.inference.base_url, e)
+            ));
+        }
+
+        // Validate model names don't contain path separators
+        if let Some(ref allowed) = self.inference.allowed_models {
+            for model in allowed {
+                if model.contains('/') || model.contains('\\') || model.contains("..") {
+                    return Err(config::ConfigError::Message(
+                        format!("Invalid model name '{}': contains path separators", model)
+                    ));
+                }
+            }
+        }
+
+        // Validate port is not 0
+        if self.server.port == 0 {
+            return Err(config::ConfigError::Message(
+                "Server port cannot be 0".to_string()
+            ));
+        }
+
+        // Validate timeout is reasonable (max 1 hour)
+        if self.inference.timeout_secs > 3600 {
+            return Err(config::ConfigError::Message(
+                "Timeout cannot exceed 3600 seconds (1 hour)".to_string()
+            ));
+        }
+
+        // Validate HTTP config if present
+        if let Some(ref http_config) = self.inference.http {
+            if http_config.timeout_secs > 3600 {
+                return Err(config::ConfigError::Message(
+                    "HTTP timeout cannot exceed 3600 seconds".to_string()
+                ));
+            }
+            if http_config.connect_timeout_secs > 300 {
+                return Err(config::ConfigError::Message(
+                    "Connect timeout cannot exceed 300 seconds".to_string()
+                ));
+            }
+        }
+
+        Ok(())
     }
 }

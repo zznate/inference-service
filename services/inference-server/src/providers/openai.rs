@@ -83,11 +83,8 @@ impl OpenAIProvider {
             "Initialized OpenAI provider with base URL: {}",
             settings.inference.base_url
         );
-        if organization_id.is_some() {
-            debug!(
-                "Using organization ID: {}",
-                organization_id.as_ref().unwrap()
-            );
+        if let Some(ref org_id) = organization_id {
+            debug!("Using organization ID: {}", org_id);
         }
 
         Ok(Self { client, settings })
