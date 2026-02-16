@@ -1,20 +1,19 @@
 use super::{
-    InferenceProvider, InferenceRequest, InferenceResponse, ProviderError,
-    standard_completion_response,
+    BoxFuture, InferenceProvider, InferenceRequest, InferenceResponse, ProviderError,
+    ProviderStream, standard_completion_response,
 };
 use crate::config::Settings;
-use crate::models::{CompletionRequest, CompletionResponse};
-use async_trait::async_trait;
+use crate::models::{CompletionRequest, CompletionResponse, FinishReason, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Mock provider for deterministic testing
 pub struct MockProvider {
-    settings: Arc<Settings>,
+    responses_dir: PathBuf,
     // Cache loaded responses to avoid repeated file I/O
     response_cache: Arc<Mutex<HashMap<String, MockResponseFile>>>,
 }
@@ -80,6 +79,18 @@ fn default_finish_reason() -> String {
     "stop".to_string()
 }
 
+/// Parse a finish_reason string into the typed enum, defaulting to Stop for unknown values
+fn parse_finish_reason(s: &str) -> FinishReason {
+    match s {
+        "stop" => FinishReason::Stop,
+        "length" => FinishReason::Length,
+        "tool_calls" => FinishReason::ToolCalls,
+        "content_filter" => FinishReason::ContentFilter,
+        "function_call" => FinishReason::FunctionCall,
+        _ => FinishReason::Stop,
+    }
+}
+
 fn default_mode() -> ResponseMode {
     ResponseMode::First
 }
@@ -100,7 +111,7 @@ impl Default for MockSettings {
 impl MockProvider {
     pub fn new(settings: Arc<Settings>) -> Result<Self, ProviderError> {
         let responses_dir = match &settings.inference.provider {
-            crate::config::InferenceProvider::Mock { responses_dir } => responses_dir,
+            crate::config::InferenceProvider::Mock { responses_dir } => responses_dir.clone(),
             _ => {
                 return Err(ProviderError::Configuration(
                     "Invalid provider configuration for MockProvider".to_string(),
@@ -127,17 +138,14 @@ impl MockProvider {
         );
 
         Ok(Self {
-            settings,
+            responses_dir,
             response_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    /// Get responses directory from settings
+    /// Get responses directory
     fn responses_dir(&self) -> &PathBuf {
-        match &self.settings.inference.provider {
-            crate::config::InferenceProvider::Mock { responses_dir } => responses_dir,
-            _ => panic!("MockProvider misconfigured"), // This should never happen given constructor validation
-        }
+        &self.responses_dir
     }
 
     /// Extract scenario name from model name (strip "mock-" prefix)
@@ -190,7 +198,7 @@ impl MockProvider {
             ProviderError::Configuration(format!("Failed to read mock file {path:?}: {e}"))
         })?;
 
-        let response_file: MockResponseFile = serde_yaml::from_str(&contents).map_err(|e| {
+        let response_file: MockResponseFile = serde_yml::from_str(&contents).map_err(|e| {
             ProviderError::Configuration(format!("Failed to parse YAML from {path:?}: {e}"))
         })?;
 
@@ -245,81 +253,54 @@ impl MockProvider {
     }
 }
 
-#[async_trait]
 impl InferenceProvider for MockProvider {
-    fn build_inference_request(
-        &self,
-        request: &CompletionRequest,
-        model: &str,
-    ) -> Result<InferenceRequest, ProviderError> {
-        // Simple pass-through for mock provider
-        Ok(InferenceRequest {
-            messages: request.messages.clone(),
-            model: model.to_string(),
-            max_tokens: request.max_tokens,
-            temperature: request.temperature,
-            top_p: request.top_p,
-            frequency_penalty: request.frequency_penalty,
-            presence_penalty: request.presence_penalty,
-            stop_sequences: super::normalize_stop_sequences(&request.stop),
-            seed: request.seed,
-            stream: request.stream,
-            n: request.n,
-            logprobs: request.logprobs,
-            top_logprobs: request.top_logprobs,
-            user: request.user.clone(),
-            response_format: request.response_format.clone(),
-            logit_bias: request.logit_bias.clone(),
-        })
-    }
-
-    #[instrument(skip(self, request), fields(
-        provider = "mock",
-        model = %request.model,
-    ))]
-    async fn execute(
+    fn execute(
         &self,
         request: &InferenceRequest,
-    ) -> Result<InferenceResponse, ProviderError> {
-        // Extract scenario from model name
-        let scenario = self.extract_scenario(&request.model)?;
+    ) -> BoxFuture<'_, Result<InferenceResponse, ProviderError>> {
+        let model = request.model.clone();
 
-        // Load responses for this scenario
-        let response_file = self.load_responses(&scenario).await?;
+        Box::pin(async move {
+            // Extract scenario from model name
+            let scenario = self.extract_scenario(&model)?;
 
-        // Select a response based on mode
-        let mock_response = self.select_response(&response_file, &scenario);
+            // Load responses for this scenario
+            let response_file = self.load_responses(&scenario).await?;
 
-        // Simulate latency if specified
-        if let Some(delay_ms) = mock_response.delay_ms {
-            debug!("Simulating {}ms latency", delay_ms);
-            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-        }
+            // Select a response based on mode
+            let mock_response = self.select_response(&response_file, &scenario);
 
-        // Build the inference response
-        Ok(InferenceResponse {
-            text: mock_response.text,
-            model_used: mock_response.model_used,
-            total_tokens: mock_response.total_tokens,
-            prompt_tokens: mock_response.prompt_tokens,
-            completion_tokens: mock_response.completion_tokens,
-            finish_reason: Some(mock_response.finish_reason),
-            latency_ms: mock_response.delay_ms,
-            provider_request_id: Some(format!("mock-{}-{}", scenario, Uuid::now_v7())),
-            system_fingerprint: mock_response.system_fingerprint,
-            tool_calls: mock_response.tool_calls,
-            logprobs: mock_response.logprobs,
-            provider_data: Some(
-                [
-                    ("scenario".to_string(), serde_json::json!(scenario)),
-                    (
-                        "mode".to_string(),
-                        serde_json::json!(format!("{:?}", response_file.settings.mode)),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-            ),
+            // Simulate latency if specified
+            if let Some(delay_ms) = mock_response.delay_ms {
+                debug!("Simulating {}ms latency", delay_ms);
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            }
+
+            // Build the inference response
+            Ok(InferenceResponse {
+                text: mock_response.text,
+                model_used: mock_response.model_used,
+                total_tokens: mock_response.total_tokens,
+                prompt_tokens: mock_response.prompt_tokens,
+                completion_tokens: mock_response.completion_tokens,
+                finish_reason: Some(parse_finish_reason(&mock_response.finish_reason)),
+                latency_ms: mock_response.delay_ms,
+                provider_request_id: Some(format!("mock-{}-{}", scenario, Uuid::now_v7())),
+                system_fingerprint: mock_response.system_fingerprint,
+                tool_calls: mock_response.tool_calls,
+                logprobs: mock_response.logprobs,
+                provider_data: Some(
+                    [
+                        ("scenario".to_string(), serde_json::json!(scenario)),
+                        (
+                            "mode".to_string(),
+                            serde_json::json!(format!("{:?}", response_file.settings.mode)),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            })
         })
     }
 
@@ -336,38 +317,46 @@ impl InferenceProvider for MockProvider {
         "mock"
     }
 
-    async fn health_check(&self) -> Result<(), ProviderError> {
-        // Check that we can access the responses directory
-        if !self.responses_dir().exists() {
-            return Err(ProviderError::Configuration(format!(
-                "Mock responses directory no longer exists: {:?}",
-                self.responses_dir()
-            )));
-        }
-        Ok(())
+    fn health_check(&self) -> BoxFuture<'_, Result<(), ProviderError>> {
+        Box::pin(async move {
+            // Check that we can access the responses directory
+            if !self.responses_dir().exists() {
+                return Err(ProviderError::Configuration(format!(
+                    "Mock responses directory no longer exists: {:?}",
+                    self.responses_dir()
+                )));
+            }
+            Ok(())
+        })
     }
 
-    async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
-        // List all available mock scenarios
-        let mut models = Vec::new();
+    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, ProviderError>> {
+        Box::pin(async move {
+            // List all available mock scenarios
+            let mut models = Vec::new();
 
-        let mut entries = tokio::fs::read_dir(self.responses_dir()).await.map_err(|e| {
-            ProviderError::Configuration(format!("Failed to read mock responses directory: {e}"))
-        })?;
+            let mut entries =
+                tokio::fs::read_dir(self.responses_dir()).await.map_err(|e| {
+                    ProviderError::Configuration(format!(
+                        "Failed to read mock responses directory: {e}"
+                    ))
+                })?;
 
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            ProviderError::Configuration(format!("Failed to read directory entry: {e}"))
-        })? {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("yaml") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            while let Some(entry) = entries.next_entry().await.map_err(|e| {
+                ProviderError::Configuration(format!("Failed to read directory entry: {e}"))
+            })? {
+                let path = entry.path();
+                if path.is_file()
+                    && path.extension().and_then(|s| s.to_str()) == Some("yaml")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                {
                     models.push(format!("mock-{stem}"));
                 }
             }
-        }
 
-        models.sort();
-        Ok(models)
+            models.sort();
+            Ok(models)
+        })
     }
 
     // ===== Streaming Support =====
@@ -378,101 +367,101 @@ impl InferenceProvider for MockProvider {
     }
 
     /// Stream completion by chunking the mock response with realistic delays
-    async fn stream(
+    fn stream(
         &self,
         request: &CompletionRequest,
         model: &str,
-    ) -> Result<
-        std::pin::Pin<
-            Box<
-                dyn futures_util::Stream<Item = Result<crate::models::StreamChunk, ProviderError>>
-                    + Send,
-            >,
-        >,
-        ProviderError,
-    > {
-        use futures_util::stream::{self, StreamExt};
-        use std::time::Duration;
-        use uuid::Uuid;
+    ) -> BoxFuture<'_, Result<ProviderStream, ProviderError>> {
+        // Build inference request before entering async block
+        let inference_req = match self.build_inference_request(request, model) {
+            Ok(req) => req,
+            Err(e) => return Box::pin(async move { Err(e) }),
+        };
 
-        // Reuse existing logic to get the mock response
-        let inference_req = self.build_inference_request(request, model)?;
-        let scenario = self.extract_scenario(&inference_req.model)?;
-        let response_file = self.load_responses(&scenario).await?;
-        let mock_response = self.select_response(&response_file, &scenario);
+        Box::pin(async move {
+            use futures_util::stream::{self, StreamExt};
+            use std::time::Duration;
+            use uuid::Uuid;
 
-        // Generate a unique request ID for this stream
-        let request_id = format!("mock-{}-{}", scenario, Uuid::now_v7());
-        let model_name = mock_response.model_used.clone();
+            let scenario = self.extract_scenario(&inference_req.model)?;
+            let response_file = self.load_responses(&scenario).await?;
+            let mock_response = self.select_response(&response_file, &scenario);
 
-        // Split response into tokens for streaming
-        let tokens = super::tokenize_for_streaming(&mock_response.text);
+            // Generate a unique request ID for this stream
+            let request_id = format!("mock-{}-{}", scenario, Uuid::now_v7());
+            let model_name = mock_response.model_used.clone();
 
-        // Clone values for the final chunk closure
-        let final_request_id = request_id.clone();
-        let final_model_name = model_name.clone();
-        let final_finish_reason = mock_response.finish_reason.clone();
-        let final_usage_info = (
-            mock_response.prompt_tokens,
-            mock_response.completion_tokens,
-            mock_response.total_tokens,
-        );
+            // Split response into tokens for streaming
+            let tokens = super::tokenize_for_streaming(&mock_response.text);
 
-        // Get chunk delay from settings or response-specific delay
-        let chunk_delay = mock_response.delay_ms.unwrap_or(response_file.settings.chunk_delay_ms);
+            // Clone values for the final chunk closure
+            let final_request_id = request_id.clone();
+            let final_model_name = model_name.clone();
+            let final_finish_reason = mock_response.finish_reason.clone();
+            let final_usage_info = (
+                mock_response.prompt_tokens,
+                mock_response.completion_tokens,
+                mock_response.total_tokens,
+            );
 
-        // Create stream that yields chunks with delay
-        let chunks_stream = stream::iter(tokens.into_iter().enumerate()).then(move |(i, token)| {
-            let chunk_id = request_id.clone();
-            let chunk_model = model_name.clone();
+            // Get chunk delay from settings or response-specific delay
+            let chunk_delay =
+                mock_response.delay_ms.unwrap_or(response_file.settings.chunk_delay_ms);
 
-            async move {
-                // Simulate realistic token generation delay
-                if chunk_delay > 0 {
-                    tokio::time::sleep(Duration::from_millis(chunk_delay)).await;
-                }
+            // Create stream that yields chunks with delay
+            let chunks_stream =
+                stream::iter(tokens.into_iter().enumerate()).then(move |(i, token)| {
+                    let chunk_id = request_id.clone();
+                    let chunk_model = model_name.clone();
 
-                if i == 0 {
-                    // First chunk includes role
-                    Ok(super::create_first_chunk(
-                        &chunk_id,
-                        &chunk_model,
-                        "assistant",
-                    ))
+                    async move {
+                        // Simulate realistic token generation delay
+                        if chunk_delay > 0 {
+                            tokio::time::sleep(Duration::from_millis(chunk_delay)).await;
+                        }
+
+                        if i == 0 {
+                            // First chunk includes role
+                            Ok(super::create_first_chunk(
+                                &chunk_id,
+                                &chunk_model,
+                                Role::Assistant,
+                            ))
+                        } else {
+                            // Content chunks
+                            Ok(super::create_content_chunk(&chunk_id, &chunk_model, &token))
+                        }
+                    }
+                });
+
+            // Add final chunk with finish_reason and usage
+            let final_chunk_stream = stream::once(async move {
+                let usage = if final_usage_info.2.is_some()
+                    || final_usage_info.0.is_some()
+                    || final_usage_info.1.is_some()
+                {
+                    Some(crate::models::Usage {
+                        prompt_tokens: final_usage_info.0,
+                        completion_tokens: final_usage_info.1,
+                        total_tokens: final_usage_info.2,
+                    })
                 } else {
-                    // Content chunks
-                    Ok(super::create_content_chunk(&chunk_id, &chunk_model, &token))
-                }
-            }
-        });
+                    None
+                };
 
-        // Add final chunk with finish_reason and usage
-        let final_chunk_stream = stream::once(async move {
-            let usage = if final_usage_info.2.is_some()
-                || final_usage_info.0.is_some()
-                || final_usage_info.1.is_some()
-            {
-                Some(crate::models::Usage {
-                    prompt_tokens: final_usage_info.0,
-                    completion_tokens: final_usage_info.1,
-                    total_tokens: final_usage_info.2,
-                })
-            } else {
-                None
-            };
+                Ok(super::create_final_chunk(
+                    &final_request_id,
+                    &final_model_name,
+                    parse_finish_reason(&final_finish_reason),
+                    usage,
+                ))
+            });
 
-            Ok(super::create_final_chunk(
-                &final_request_id,
-                &final_model_name,
-                &final_finish_reason,
-                usage,
-            ))
-        });
+            // Combine the streams
+            let combined_stream = chunks_stream.chain(final_chunk_stream);
 
-        // Combine the streams
-        let combined_stream = chunks_stream.chain(final_chunk_stream);
-
-        Ok(Box::pin(combined_stream))
+            Ok(Box::pin(combined_stream) as ProviderStream)
+        })
     }
 }
 

@@ -6,7 +6,7 @@ use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::fmt;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-pub fn init_logging(config: &LoggingConfig) -> SdkLoggerProvider {
+pub fn init_logging(config: &LoggingConfig) -> (SdkLoggerProvider, Option<WorkerGuard>) {
     // Simple stdout exporter for now
     let exporter = opentelemetry_stdout::LogExporter::default();
 
@@ -25,17 +25,18 @@ pub fn init_logging(config: &LoggingConfig) -> SdkLoggerProvider {
         .with(telemetry_layer);
 
     // Apply format and writer in one go
-    match config.output {
-        LogOutput::Stdout => match config.format {
-            LogFormat::Pretty => subscriber.with(fmt::layer().pretty()).init(),
-            LogFormat::Json => subscriber.with(fmt::layer().json()).init(),
-            LogFormat::Compact => subscriber.with(fmt::layer().compact()).init(),
-        },
+    let guard = match config.output {
+        LogOutput::Stdout => {
+            match config.format {
+                LogFormat::Pretty => subscriber.with(fmt::layer().pretty()).init(),
+                LogFormat::Json => subscriber.with(fmt::layer().json()).init(),
+                LogFormat::Compact => subscriber.with(fmt::layer().compact()).init(),
+            }
+            None
+        }
         LogOutput::File => {
             if let Some(file_config) = &config.file {
-                let (writer, _guard) = create_file_writer(file_config);
-                // Leak the guard to keep it alive for the program duration
-                Box::leak(Box::new(_guard));
+                let (writer, guard) = create_file_writer(file_config);
 
                 match config.format {
                     LogFormat::Pretty => subscriber
@@ -48,29 +49,50 @@ pub fn init_logging(config: &LoggingConfig) -> SdkLoggerProvider {
                         .with(fmt::layer().compact().with_writer(writer))
                         .init(),
                 }
+                Some(guard)
             } else {
                 eprintln!("File output requested but no file config provided");
                 subscriber.with(fmt::layer()).init();
+                None
             }
         }
         LogOutput::Both => {
-            // For simplicity, just use stdout for now
-            // Properly implementing "both" requires more complex layering
-            tracing::warn!("'Both' output not fully implemented, using stdout only");
-            match config.format {
-                LogFormat::Pretty => subscriber.with(fmt::layer().pretty()).init(),
-                LogFormat::Json => subscriber.with(fmt::layer().json()).init(),
-                LogFormat::Compact => subscriber.with(fmt::layer().compact()).init(),
+            if let Some(file_config) = &config.file {
+                let (file_writer, guard) = create_file_writer(file_config);
+
+                match config.format {
+                    LogFormat::Pretty => subscriber
+                        .with(fmt::layer().pretty().with_writer(file_writer))
+                        .with(fmt::layer().pretty())
+                        .init(),
+                    LogFormat::Json => subscriber
+                        .with(fmt::layer().json().with_writer(file_writer))
+                        .with(fmt::layer().json())
+                        .init(),
+                    LogFormat::Compact => subscriber
+                        .with(fmt::layer().compact().with_writer(file_writer))
+                        .with(fmt::layer().compact())
+                        .init(),
+                }
+                Some(guard)
+            } else {
+                eprintln!("'Both' output requested but no file config provided, using stdout only");
+                match config.format {
+                    LogFormat::Pretty => subscriber.with(fmt::layer().pretty()).init(),
+                    LogFormat::Json => subscriber.with(fmt::layer().json()).init(),
+                    LogFormat::Compact => subscriber.with(fmt::layer().compact()).init(),
+                }
+                None
             }
         }
-    }
+    };
 
     tracing::info!(
         "Logging initialized: level={}, format={:?}",
         config.level,
         config.format
     );
-    logger_provider
+    (logger_provider, guard)
 }
 
 fn create_file_writer(

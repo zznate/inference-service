@@ -301,6 +301,40 @@ impl Settings {
                     "Connect timeout cannot exceed 300 seconds".to_string()
                 ));
             }
+            if http_config.max_retries > 10 {
+                return Err(config::ConfigError::Message(
+                    "max_retries cannot exceed 10".to_string()
+                ));
+            }
+            if http_config.retry_backoff_ms > 30000 {
+                return Err(config::ConfigError::Message(
+                    "retry_backoff_ms cannot exceed 30000".to_string()
+                ));
+            }
+        }
+
+        // Validate LogOutput::File and LogOutput::Both require file config
+        match self.logging.output {
+            LogOutput::File | LogOutput::Both => {
+                if self.logging.file.is_none() {
+                    return Err(config::ConfigError::Message(
+                        "Log output 'file' or 'both' requires a [logging.file] configuration section".to_string()
+                    ));
+                }
+            }
+            LogOutput::Stdout => {}
+        }
+
+        // Validate default_model is in allowed_models (if allowed_models is set)
+        if let Some(ref allowed) = self.inference.allowed_models
+            && !allowed.contains(&self.inference.default_model)
+        {
+            return Err(config::ConfigError::Message(
+                format!(
+                    "default_model '{}' must be in allowed_models list",
+                    self.inference.default_model
+                )
+            ));
         }
 
         Ok(())

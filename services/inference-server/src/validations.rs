@@ -15,7 +15,6 @@ pub enum ValidationError {
     InvalidN(u32),
     ModelNotInAllowedList { model: String, allowed: Vec<String> },
     StreamingNotSupported,
-    InvalidResponseFormat(String),
     InvalidLogitBias { token_id: String, reason: String },
 }
 
@@ -97,15 +96,6 @@ impl ValidationError {
                 param: Some("stream".to_string()),
                 code: Some("unsupported_parameter".to_string()),
             },
-            ValidationError::InvalidResponseFormat(format_type) => OpenAIError {
-                message: format!(
-                    "Response format type must be 'text' or 'json_object', got '{}'",
-                    format_type
-                ),
-                error_type: "invalid_request_error".to_string(),
-                param: Some("response_format".to_string()),
-                code: None,
-            },
             ValidationError::InvalidLogitBias { token_id, reason } => OpenAIError {
                 message: format!("Invalid logit bias for token '{}': {}", token_id, reason),
                 error_type: "invalid_request_error".to_string(),
@@ -115,6 +105,14 @@ impl ValidationError {
         }
     }
 }
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_openai_error().message)
+    }
+}
+
+impl std::error::Error for ValidationError {}
 
 impl IntoResponse for ValidationError {
     fn into_response(self) -> Response {
@@ -143,62 +141,55 @@ pub fn validate_completion_request(request: &CompletionRequest) -> Result<(), Va
     }
 
     // Validate max_tokens if present
-    if let Some(max_tokens) = request.max_tokens {
-        if max_tokens == 0 || max_tokens > 128000 {
-            // GPT-4 max context
-            return Err(ValidationError::InvalidMaxTokens(max_tokens));
-        }
+    if let Some(max_tokens) = request.max_tokens
+        && (max_tokens == 0 || max_tokens > 128000)
+    {
+        return Err(ValidationError::InvalidMaxTokens(max_tokens));
     }
 
     // Validate temperature
-    if let Some(temperature) = request.temperature {
-        if !(0.0..=2.0).contains(&temperature) {
-            return Err(ValidationError::InvalidTemperature(temperature));
-        }
+    if let Some(temperature) = request.temperature
+        && !(0.0..=2.0).contains(&temperature)
+    {
+        return Err(ValidationError::InvalidTemperature(temperature));
     }
 
     // Validate top_p
-    if let Some(top_p) = request.top_p {
-        if !(0.0..=1.0).contains(&top_p) {
-            return Err(ValidationError::InvalidTopP(top_p));
-        }
+    if let Some(top_p) = request.top_p
+        && !(0.0..=1.0).contains(&top_p)
+    {
+        return Err(ValidationError::InvalidTopP(top_p));
     }
 
     // Validate frequency_penalty
-    if let Some(penalty) = request.frequency_penalty {
-        if !(-2.0..=2.0).contains(&penalty) {
-            return Err(ValidationError::InvalidFrequencyPenalty(penalty));
-        }
+    if let Some(penalty) = request.frequency_penalty
+        && !(-2.0..=2.0).contains(&penalty)
+    {
+        return Err(ValidationError::InvalidFrequencyPenalty(penalty));
     }
 
     // Validate presence_penalty
-    if let Some(penalty) = request.presence_penalty {
-        if !(-2.0..=2.0).contains(&penalty) {
-            return Err(ValidationError::InvalidPresencePenalty(penalty));
-        }
+    if let Some(penalty) = request.presence_penalty
+        && !(-2.0..=2.0).contains(&penalty)
+    {
+        return Err(ValidationError::InvalidPresencePenalty(penalty));
     }
 
     // Validate top_logprobs
-    if let Some(top_logprobs) = request.top_logprobs {
-        if top_logprobs > 20 {
-            return Err(ValidationError::InvalidTopLogprobs(top_logprobs));
-        }
+    if let Some(top_logprobs) = request.top_logprobs
+        && top_logprobs > 20
+    {
+        return Err(ValidationError::InvalidTopLogprobs(top_logprobs));
     }
 
     // Validate n (number of choices)
-    if let Some(n) = request.n {
-        if n == 0 || n > 10 {
-            return Err(ValidationError::InvalidN(n));
-        }
+    if let Some(n) = request.n
+        && (n == 0 || n > 10)
+    {
+        return Err(ValidationError::InvalidN(n));
     }
 
-    // Validate response_format
-    if let Some(ref response_format) = request.response_format {
-        let format_type = &response_format.format_type;
-        if format_type != "text" && format_type != "json_object" {
-            return Err(ValidationError::InvalidResponseFormat(format_type.clone()));
-        }
-    }
+    // Note: response_format.format_type is now validated at deserialization by the FormatType enum
 
     // Validate logit_bias
     if let Some(ref logit_bias) = request.logit_bias {
@@ -235,13 +226,13 @@ pub fn validate_model_allowed(
     requested_model: &str,
     allowed_models: Option<&HashSet<String>>,
 ) -> Result<(), ValidationError> {
-    if let Some(allowed) = allowed_models {
-        if !allowed.contains(requested_model) {
-            return Err(ValidationError::ModelNotInAllowedList {
-                model: requested_model.to_string(),
-                allowed: allowed.iter().cloned().collect(),
-            });
-        }
+    if let Some(allowed) = allowed_models
+        && !allowed.contains(requested_model)
+    {
+        return Err(ValidationError::ModelNotInAllowedList {
+            model: requested_model.to_string(),
+            allowed: allowed.iter().cloned().collect(),
+        });
     }
     Ok(())
 }
@@ -281,7 +272,7 @@ pub fn determine_model<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Message;
+    use crate::models::{Message, Role};
 
     #[test]
     fn test_validate_empty_messages() {
@@ -301,7 +292,7 @@ mod tests {
     fn test_validate_null_content_allowed_with_tools() {
         let request = CompletionRequest {
             messages: vec![Message {
-                role: "assistant".to_string(),
+                role: Role::Assistant,
                 content: None,
                 tool_calls: Some(vec![]),
                 ..Default::default()
@@ -318,7 +309,7 @@ mod tests {
     fn test_validate_all_null_content_fails() {
         let request = CompletionRequest {
             messages: vec![Message {
-                role: "user".to_string(),
+                role: Role::User,
                 content: None,
                 ..Default::default()
             }],
@@ -333,7 +324,7 @@ mod tests {
     #[test]
     fn test_validate_frequency_penalty_bounds() {
         let request = CompletionRequest {
-            messages: vec![Message::new("user", "test")],
+            messages: vec![Message::new(Role::User, "test")],
             frequency_penalty: Some(2.1),
             ..Default::default()
         };
@@ -348,7 +339,7 @@ mod tests {
     #[test]
     fn test_validate_provider_capabilities() {
         let request = CompletionRequest {
-            messages: vec![Message::new("user", "test")],
+            messages: vec![Message::new(Role::User, "test")],
             stream: Some(true),
             ..Default::default()
         };

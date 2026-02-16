@@ -19,7 +19,10 @@ use serde::Serialize;
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, info, instrument};
 
 use providers::InferenceProvider;
@@ -64,10 +67,10 @@ struct RootResponse {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::new().expect("Failed to load configuration");
 
-    let logger_provider = telemetry::init_logging(&settings.logging);
+    let (logger_provider, _worker_guard) = telemetry::init_logging(&settings.logging);
 
     let settings = Arc::new(settings);
     let provider = create_provider(&settings).expect("Failed to create inference provider");
@@ -81,16 +84,28 @@ async fn main() {
         .route("/v1/chat/completions", post(generate_completion))
         .route("/v1/models", get(list_models))
         .route("/health", get(health_check))
-        .with_state(app_state);
+        .with_state(app_state)
+        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB max body
+        .layer(TimeoutLayer::new(Duration::from_secs(settings.inference.timeout_secs)));
 
     let addr = format!("{}:{}", settings.server.host, settings.server.port);
-    let listener = TcpListener::bind(&addr).await.unwrap();
+    let listener = TcpListener::bind(&addr).await?;
 
     info!("Server listening on {}", addr);
 
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     telemetry::shutdown_logging(logger_provider);
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to install CTRL+C signal handler");
+    info!("Shutdown signal received, starting graceful shutdown");
 }
 
 // Factory function to create the right provider

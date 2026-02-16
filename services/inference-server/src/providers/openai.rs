@@ -1,18 +1,17 @@
 use super::{
-    InferenceProvider, InferenceRequest, InferenceResponse, ProviderError,
-    standard_completion_response,
+    BoxFuture, HttpProviderClient, InferenceProvider, InferenceRequest, InferenceResponse,
+    ProviderError, ProviderStream, standard_completion_response,
 };
 use crate::config::{HttpConfigSchema, Settings};
 use crate::models::{CompletionRequest, CompletionResponse, StreamChunk};
-use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json;
 use std::sync::Arc;
-use tracing::{debug, error, instrument};
+use tracing::debug;
 
 pub struct OpenAIProvider {
-    client: reqwest::Client,
-    settings: Arc<Settings>,
+    http: HttpProviderClient,
 }
 
 impl OpenAIProvider {
@@ -29,23 +28,8 @@ impl OpenAIProvider {
             }
         };
 
-        // Get HTTP config (use defaults if not provided)
-        let http_config = settings.inference.http.as_ref().cloned().unwrap_or({
-            // Provide sane defaults for development/testing
-            HttpConfigSchema {
-                timeout_secs: 30,
-                connect_timeout_secs: 10,
-                max_retries: 3,
-                retry_backoff_ms: 100,
-                keep_alive_secs: Some(30),
-                max_idle_connections: Some(10),
-            }
-        });
-
         // Build headers with authentication
         let mut headers = HeaderMap::new();
-
-        // Add API key
         let auth_value = format!("Bearer {api_key}");
         headers.insert(
             AUTHORIZATION,
@@ -53,8 +37,6 @@ impl OpenAIProvider {
                 ProviderError::Configuration(format!("Invalid API key format: {e}"))
             })?,
         );
-
-        // Add organization ID if provided
         if let Some(ref org_id) = organization_id {
             headers.insert(
                 "OpenAI-Organization",
@@ -63,31 +45,20 @@ impl OpenAIProvider {
                 })?,
             );
         }
-
-        // Always set content type
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-        // Build HTTP client with our config and headers
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .timeout(http_config.timeout())
-            .connect_timeout(http_config.connect_timeout())
-            .pool_idle_timeout(http_config.keep_alive())
-            .pool_max_idle_per_host(http_config.max_idle_connections.unwrap_or(10))
-            .build()
-            .map_err(|e| {
-                ProviderError::Configuration(format!("Failed to build HTTP client: {e}"))
-            })?;
+        let http = HttpProviderClient::new(
+            &settings.inference.base_url,
+            settings.inference.http.as_ref(),
+            Some(headers),
+        )?;
 
         debug!(
             "Initialized OpenAI provider with base URL: {}",
             settings.inference.base_url
         );
-        if let Some(ref org_id) = organization_id {
-            debug!("Using organization ID: {}", org_id);
-        }
 
-        Ok(Self { client, settings })
+        Ok(Self { http })
     }
 
     /// Build request body for OpenAI (already in OpenAI format)
@@ -248,95 +219,27 @@ impl OpenAIProvider {
     }
 }
 
-#[async_trait]
 impl InferenceProvider for OpenAIProvider {
-    fn build_inference_request(
-        &self,
-        request: &CompletionRequest,
-        model: &str,
-    ) -> Result<InferenceRequest, ProviderError> {
-        // Transform OpenAI format to our internal format (mostly pass-through)
-        Ok(InferenceRequest {
-            messages: request.messages.clone(),
-            model: model.to_string(),
-            max_tokens: request.max_tokens,
-            temperature: request.temperature,
-            // OpenAI supports all these additional parameters
-            top_p: request.top_p,
-            frequency_penalty: request.frequency_penalty,
-            presence_penalty: request.presence_penalty,
-            stop_sequences: super::normalize_stop_sequences(&request.stop),
-            seed: request.seed,
-            stream: request.stream,
-            n: request.n,
-            logprobs: request.logprobs,
-            top_logprobs: request.top_logprobs,
-            user: request.user.clone(),
-            response_format: request.response_format.clone(),
-            logit_bias: request.logit_bias.clone(),
-        })
-    }
-
-    #[instrument(skip(self, request), fields(
-        provider = "openai",
-        model = %request.model,
-        message_count = request.messages.len(),
-    ))]
-    async fn execute(
+    fn execute(
         &self,
         request: &InferenceRequest,
-    ) -> Result<InferenceResponse, ProviderError> {
-        // Build request body
+    ) -> BoxFuture<'_, Result<InferenceResponse, ProviderError>> {
         let request_body = self.build_request_body(request);
 
-        debug!("Sending request to OpenAI: {}", request_body);
+        Box::pin(async move {
+            debug!("Sending request to OpenAI: {}", request_body);
+            let start = std::time::Instant::now();
 
-        // Track request timing
-        let start = std::time::Instant::now();
+            // OpenAI returns JSON errors even on non-200 status, so we use post_json with retry
+            let response_body = self.http.post_json("chat/completions", &request_body).await?;
 
-        // Execute HTTP request
-        let response = self
-            .client
-            .post(format!(
-                "{}/chat/completions",
-                self.settings.inference.base_url
-            ))
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| {
-                error!("Failed to send request to OpenAI: {}", e);
-                if e.is_timeout() {
-                    ProviderError::Timeout
-                } else if e.is_connect() {
-                    ProviderError::ConnectionFailed(format!("Connection failed: {e}"))
-                } else {
-                    ProviderError::RequestFailed {
-                        status: 0,
-                        message: e.to_string(),
-                    }
-                }
-            })?;
+            let latency_ms = start.elapsed().as_millis() as u64;
+            debug!("OpenAI response: {}", response_body);
 
-        let latency_ms = start.elapsed().as_millis() as u64;
-
-        // Check HTTP status
-        let status = response.status();
-
-        // Get response body as JSON regardless of status
-        // OpenAI returns JSON errors even on non-200 status
-        let response_body: serde_json::Value = response.json().await.map_err(|e| {
-            error!("Failed to parse OpenAI response: {}", e);
-            ProviderError::InvalidResponse(format!("Invalid JSON response: {e}"))
-        })?;
-
-        debug!("OpenAI response (status {}): {}", status, response_body);
-
-        // Parse response (handles both success and error cases)
-        let mut inference_response = self.parse_response_body(response_body)?;
-        inference_response.latency_ms = Some(latency_ms);
-
-        Ok(inference_response)
+            let mut inference_response = self.parse_response_body(response_body)?;
+            inference_response.latency_ms = Some(latency_ms);
+            Ok(inference_response)
+        })
     }
 
     fn build_completion_response(
@@ -344,111 +247,83 @@ impl InferenceProvider for OpenAIProvider {
         response: &InferenceResponse,
         original_request: &CompletionRequest,
     ) -> CompletionResponse {
-        // Use the standard helper function
         standard_completion_response(response, original_request, self.name())
     }
 
     /// Override generate to properly handle n > 1 completions
-    /// When n > 1, we need to return all choices, not just the first one
-    async fn generate(
+    fn generate(
         &self,
         request: &CompletionRequest,
         model: &str,
-    ) -> Result<CompletionResponse, ProviderError> {
-        // Build inference request
-        let inference_req = self.build_inference_request(request, model)?;
+    ) -> BoxFuture<'_, Result<CompletionResponse, ProviderError>> {
+        let inference_req = match self.build_inference_request(request, model) {
+            Ok(req) => req,
+            Err(e) => return Box::pin(async move { Err(e) }),
+        };
         let request_body = self.build_request_body(&inference_req);
 
-        debug!("Sending request to OpenAI: {}", request_body);
+        Box::pin(async move {
+            debug!("Sending request to OpenAI: {}", request_body);
+            let start = std::time::Instant::now();
+            let response_body = self.http.post_json("chat/completions", &request_body).await?;
+            let latency_ms = start.elapsed().as_millis() as u64;
+            debug!("OpenAI response: {}", response_body);
 
-        // Track request timing
-        let start = std::time::Instant::now();
+            // Parse as full CompletionResponse (handles all n choices)
+            if let Ok(completion_response) =
+                serde_json::from_value::<CompletionResponse>(response_body.clone())
+            {
+                debug!(
+                    "OpenAI request completed in {}ms with {} choices",
+                    latency_ms,
+                    completion_response.choices.len()
+                );
+                return Ok(completion_response);
+            }
 
-        // Execute HTTP request
-        let response = self
-            .client
-            .post(format!(
-                "{}/chat/completions",
-                self.settings.inference.base_url
-            ))
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| {
-                error!("Failed to send request to OpenAI: {}", e);
-                if e.is_timeout() {
-                    ProviderError::Timeout
-                } else if e.is_connect() {
-                    ProviderError::ConnectionFailed(format!("Connection failed: {e}"))
-                } else {
-                    ProviderError::RequestFailed {
-                        status: 0,
-                        message: e.to_string(),
+            // Check if it's an error response
+            if let Some(error) = response_body.get("error") {
+                let error_message = error
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown error");
+                let error_type = error
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("unknown");
+                let error_code = error.get("code").and_then(|c| c.as_str());
+
+                return match error_type {
+                    "insufficient_quota" | "rate_limit_exceeded" => {
+                        Err(ProviderError::RequestFailed {
+                            status: 429,
+                            message: format!("OpenAI API error: {error_message}"),
+                        })
                     }
-                }
-            })?;
+                    "model_not_found" => Err(ProviderError::ModelNotAvailable {
+                        requested: self.extract_model_from_error(error_message),
+                        available: vec![],
+                    }),
+                    "invalid_api_key" | "invalid_organization" => {
+                        Err(ProviderError::Configuration(format!(
+                            "Authentication error: {error_message}"
+                        )))
+                    }
+                    _ => Err(ProviderError::RequestFailed {
+                        status: 500,
+                        message: format!(
+                            "OpenAI API error ({}): {}",
+                            error_code.unwrap_or(error_type),
+                            error_message
+                        ),
+                    }),
+                };
+            }
 
-        let latency_ms = start.elapsed().as_millis() as u64;
-
-        // Check HTTP status
-        let status = response.status();
-
-        // Get response body as JSON regardless of status
-        let response_body: serde_json::Value = response.json().await.map_err(|e| {
-            error!("Failed to parse OpenAI response: {}", e);
-            ProviderError::InvalidResponse(format!("Invalid JSON response: {e}"))
-        })?;
-
-        debug!("OpenAI response (status {}): {}", status, response_body);
-
-        // Parse as full CompletionResponse (handles all n choices)
-        if let Ok(completion_response) =
-            serde_json::from_value::<CompletionResponse>(response_body.clone())
-        {
-            // Add latency info if we want to track it
-            debug!("OpenAI request completed in {}ms with {} choices",
-                latency_ms, completion_response.choices.len());
-            return Ok(completion_response);
-        }
-
-        // Check if it's an error response
-        if let Some(error) = response_body.get("error") {
-            let error_message = error
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown error");
-            let error_type = error
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("unknown");
-            let error_code = error.get("code").and_then(|c| c.as_str());
-
-            return match error_type {
-                "insufficient_quota" | "rate_limit_exceeded" => Err(ProviderError::RequestFailed {
-                    status: 429,
-                    message: format!("OpenAI API error: {error_message}"),
-                }),
-                "model_not_found" => Err(ProviderError::ModelNotAvailable {
-                    requested: self.extract_model_from_error(error_message),
-                    available: vec![],
-                }),
-                "invalid_api_key" | "invalid_organization" => Err(ProviderError::Configuration(
-                    format!("Authentication error: {error_message}"),
-                )),
-                _ => Err(ProviderError::RequestFailed {
-                    status: 500,
-                    message: format!(
-                        "OpenAI API error ({}): {}",
-                        error_code.unwrap_or(error_type),
-                        error_message
-                    ),
-                }),
-            };
-        }
-
-        Err(ProviderError::InvalidResponse(
-            "Unexpected response format from OpenAI".to_string(),
-        ))
+            Err(ProviderError::InvalidResponse(
+                "Unexpected response format from OpenAI".to_string(),
+            ))
+        })
     }
 
     fn name(&self) -> &str {
@@ -456,200 +331,104 @@ impl InferenceProvider for OpenAIProvider {
     }
 
     fn http_config(&self) -> Option<&HttpConfigSchema> {
-        self.settings.inference.http.as_ref()
+        Some(self.http.http_config())
     }
 
-    async fn health_check(&self) -> Result<(), ProviderError> {
-        // Try to list models as a health check
-        let response = self
-            .client
-            .get(format!("{}/models", self.settings.inference.base_url))
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    ProviderError::Timeout
-                } else if e.is_connect() {
-                    ProviderError::ConnectionFailed(format!("Health check failed: {e}"))
-                } else {
-                    ProviderError::RequestFailed {
-                        status: 0,
-                        message: format!("Health check failed: {e}"),
-                    }
-                }
+    fn health_check(&self) -> BoxFuture<'_, Result<(), ProviderError>> {
+        Box::pin(async move {
+            let response = self.http.get("models").await?;
+            if response.status().is_success() {
+                Ok(())
+            } else if response.status() == 401 {
+                Err(ProviderError::Configuration("Invalid API key".to_string()))
+            } else {
+                Err(ProviderError::RequestFailed {
+                    status: response.status().as_u16(),
+                    message: "Health check failed".to_string(),
+                })
+            }
+        })
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, ProviderError>> {
+        Box::pin(async move {
+            #[derive(serde::Deserialize)]
+            struct ModelsResponse {
+                data: Vec<ModelInfo>,
+            }
+            #[derive(serde::Deserialize)]
+            struct ModelInfo {
+                id: String,
+            }
+
+            let response = self.http.get("models").await?;
+            if !response.status().is_success() {
+                return Err(ProviderError::RequestFailed {
+                    status: response.status().as_u16(),
+                    message: "Failed to list models".to_string(),
+                });
+            }
+            let models_response: ModelsResponse = response.json().await.map_err(|e| {
+                ProviderError::InvalidResponse(format!("Invalid models response: {e}"))
             })?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else if response.status() == 401 {
-            Err(ProviderError::Configuration("Invalid API key".to_string()))
-        } else {
-            Err(ProviderError::RequestFailed {
-                status: response.status().as_u16(),
-                message: "Health check failed".to_string(),
-            })
-        }
+            Ok(models_response
+                .data
+                .into_iter()
+                .map(|m| m.id)
+                .filter(|id| {
+                    id.contains("gpt") || id.contains("turbo") || id.contains("davinci")
+                })
+                .collect())
+        })
     }
 
-    async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
-        #[derive(serde::Deserialize)]
-        struct ModelsResponse {
-            data: Vec<ModelInfo>,
-        }
-
-        #[derive(serde::Deserialize)]
-        struct ModelInfo {
-            id: String,
-        }
-
-        let response = self
-            .client
-            .get(format!("{}/models", self.settings.inference.base_url))
-            .send()
-            .await
-            .map_err(|e| ProviderError::ConnectionFailed(format!("Failed to list models: {e}")))?;
-
-        if !response.status().is_success() {
-            return Err(ProviderError::RequestFailed {
-                status: response.status().as_u16(),
-                message: "Failed to list models".to_string(),
-            });
-        }
-
-        let models_response: ModelsResponse = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(format!("Invalid models response: {e}")))?;
-
-        // Filter to only chat models (ones that work with chat completions)
-        let chat_models: Vec<String> = models_response
-            .data
-            .into_iter()
-            .map(|m| m.id)
-            .filter(|id| id.contains("gpt") || id.contains("turbo") || id.contains("davinci"))
-            .collect();
-
-        Ok(chat_models)
-    }
-
-    // ===== Streaming Support =====
-
-    /// OpenAI provider supports native streaming
     fn supports_streaming(&self) -> bool {
         true
     }
 
-    /// Stream completion using OpenAI's native SSE streaming
-    async fn stream(
+    fn stream(
         &self,
         request: &CompletionRequest,
         model: &str,
-    ) -> Result<
-        std::pin::Pin<
-            Box<
-                dyn futures_util::Stream<Item = Result<crate::models::StreamChunk, ProviderError>>
-                    + Send,
-            >,
-        >,
-        ProviderError,
-    > {
-        use eventsource_stream::Eventsource;
-        use futures_util::stream::{StreamExt, TryStreamExt};
-
-        // Reuse existing request building logic but add stream: true
-        let inference_req = self.build_inference_request(request, model)?;
+    ) -> BoxFuture<'_, Result<ProviderStream, ProviderError>> {
+        let inference_req = match self.build_inference_request(request, model) {
+            Ok(req) => req,
+            Err(e) => return Box::pin(async move { Err(e) }),
+        };
         let mut request_body = self.build_request_body(&inference_req);
         request_body["stream"] = serde_json::json!(true);
 
-        debug!("Sending streaming request to OpenAI: {}", request_body);
+        Box::pin(async move {
+            use eventsource_stream::Eventsource;
+            use futures_util::stream::StreamExt;
 
-        // Execute HTTP request
-        let response = self
-            .client
-            .post(format!(
-                "{}/chat/completions",
-                self.settings.inference.base_url
-            ))
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| {
-                error!("Failed to send streaming request to OpenAI: {}", e);
-                if e.is_timeout() {
-                    ProviderError::Timeout
-                } else if e.is_connect() {
-                    ProviderError::ConnectionFailed(format!("Connection failed: {e}"))
-                } else {
-                    ProviderError::RequestFailed {
-                        status: 0,
-                        message: e.to_string(),
-                    }
-                }
-            })?;
+            debug!("Sending streaming request to OpenAI: {}", request_body);
+            let response = self.http.post_stream("chat/completions", &request_body).await?;
 
-        // Check HTTP status
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            error!(
-                "OpenAI streaming returned error status {}: {}",
-                status, error_text
-            );
-            return Err(ProviderError::RequestFailed {
-                status: status.as_u16(),
-                message: format!("OpenAI streaming error: {error_text}"),
-            });
-        }
-
-        // Parse SSE stream from OpenAI using correct API
-        let bytes_stream = response
-            .bytes_stream()
-            .map_err(std::io::Error::other);
-
-        let sse_stream = bytes_stream
-            .eventsource()
-            .filter_map(|event_result| async move {
-                match event_result {
-                    Ok(event) => {
-                        let data = &event.data;
-                        debug!("Received SSE event type: {:?}, data: {}", event.event, data);
-
-                        if data == "[DONE]" {
-                            debug!("OpenAI stream completed with [DONE] marker");
-                            None // End of stream marker
-                        } else {
-                            // Parse streaming chunk
-                            match serde_json::from_str::<StreamChunk>(data) {
-                                Ok(chunk) => {
-                                    debug!(
-                                        "Received OpenAI stream chunk: {:?}",
-                                        chunk.choices.first().map(|c| &c.delta.content)
-                                    );
-                                    Some(Ok(chunk))
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "Failed to parse OpenAI stream chunk: {} - Data: {}",
-                                        e, data
-                                    );
-                                    Some(Err(ProviderError::StreamError(format!(
+            let bytes_stream = response.bytes_stream().map_err(std::io::Error::other);
+            let sse_stream = bytes_stream
+                .eventsource()
+                .filter_map(|event_result| async move {
+                    match event_result {
+                        Ok(event) => {
+                            let data = &event.data;
+                            if data == "[DONE]" {
+                                None
+                            } else {
+                                match serde_json::from_str::<StreamChunk>(data) {
+                                    Ok(chunk) => Some(Ok(chunk)),
+                                    Err(e) => Some(Err(ProviderError::StreamError(format!(
                                         "Invalid stream chunk: {e}"
-                                    ))))
+                                    )))),
                                 }
                             }
                         }
+                        Err(e) => Some(Err(ProviderError::StreamError(format!("SSE error: {e}")))),
                     }
-                    Err(e) => {
-                        error!("SSE parsing error: {}", e);
-                        Some(Err(ProviderError::StreamError(format!("SSE error: {e}"))))
-                    }
-                }
-            });
+                });
 
-        Ok(Box::pin(sse_stream))
+            Ok(Box::pin(sse_stream) as ProviderStream)
+        })
     }
 }
 
@@ -657,7 +436,7 @@ impl InferenceProvider for OpenAIProvider {
 mod tests {
     use super::*;
     use crate::config::{InferenceConfig, LogFormat, LogOutput, LoggingConfig, ServerConfig};
-    use crate::models::Message;
+    use crate::models::{Message, Role};
 
     fn create_test_settings() -> Arc<Settings> {
         Arc::new(Settings {
@@ -690,7 +469,7 @@ mod tests {
         let provider = OpenAIProvider::new(create_test_settings()).unwrap();
 
         let request = InferenceRequest {
-            messages: vec![Message::new("user", "Hello")],
+            messages: vec![Message::new(Role::User, "Hello")],
             model: "gpt-3.5-turbo".to_string(),
             max_tokens: Some(100),
             temperature: Some(0.7),
@@ -751,7 +530,7 @@ mod tests {
         let provider = OpenAIProvider::new(create_test_settings()).unwrap();
 
         let request = InferenceRequest {
-            messages: vec![Message::new("user", "Hello")],
+            messages: vec![Message::new(Role::User, "Hello")],
             model: "gpt-3.5-turbo".to_string(),
             max_tokens: Some(100),
             temperature: Some(0.7),
@@ -782,7 +561,7 @@ mod tests {
         let provider = OpenAIProvider::new(create_test_settings()).unwrap();
 
         let request = InferenceRequest {
-            messages: vec![Message::new("user", "Hello")],
+            messages: vec![Message::new(Role::User, "Hello")],
             model: "gpt-3.5-turbo".to_string(),
             max_tokens: Some(100),
             temperature: Some(0.7),

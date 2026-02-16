@@ -11,6 +11,24 @@ pub enum ApiError {
     Provider(ProviderError),
 }
 
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiError::Validation(e) => write!(f, "{e}"),
+            ApiError::Provider(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ApiError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ApiError::Validation(e) => Some(e),
+            ApiError::Provider(e) => Some(e),
+        }
+    }
+}
+
 impl From<ProviderError> for ApiError {
     fn from(err: ProviderError) -> Self {
         ApiError::Provider(err)

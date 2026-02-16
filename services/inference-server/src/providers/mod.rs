@@ -1,14 +1,202 @@
 use crate::config::HttpConfigSchema;
-use crate::models::{Choice, CompletionRequest, CompletionResponse, Message, Usage};
-use async_trait::async_trait;
+use crate::models::{Choice, CompletionRequest, CompletionResponse, FinishReason, Message, Role, Usage};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use tracing::{debug, error};
 use uuid::Uuid;
+
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub mod lmstudio;
 pub mod mock;
 pub mod openai;
+
+// ===== HttpProviderClient =====
+
+/// Shared HTTP client for providers that communicate over HTTP.
+/// Consolidates HTTP client construction, URL building, error mapping, and retry logic.
+pub struct HttpProviderClient {
+    client: reqwest::Client,
+    base_url: url::Url,
+    http_config: HttpConfigSchema,
+}
+
+impl HttpProviderClient {
+    /// Create a new HTTP provider client.
+    /// `default_headers` can include auth headers (e.g., OpenAI Bearer token).
+    pub fn new(
+        base_url: &str,
+        http_config: Option<&HttpConfigSchema>,
+        default_headers: Option<reqwest::header::HeaderMap>,
+    ) -> Result<Self, ProviderError> {
+        let parsed_url = url::Url::parse(base_url).map_err(|e| {
+            ProviderError::Configuration(format!("Invalid base URL '{base_url}': {e}"))
+        })?;
+
+        let config = http_config.cloned().unwrap_or_default();
+
+        let mut builder = reqwest::Client::builder()
+            .timeout(config.timeout())
+            .connect_timeout(config.connect_timeout())
+            .pool_idle_timeout(config.keep_alive())
+            .pool_max_idle_per_host(config.max_idle_connections.unwrap_or(10));
+
+        if let Some(headers) = default_headers {
+            builder = builder.default_headers(headers);
+        }
+
+        let client = builder.build().map_err(|e| {
+            ProviderError::Configuration(format!("Failed to build HTTP client: {e}"))
+        })?;
+
+        Ok(Self {
+            client,
+            base_url: parsed_url,
+            http_config: config,
+        })
+    }
+
+    /// Build a full URL by joining a path onto the base URL.
+    pub fn url(&self, path: &str) -> String {
+        // Use simple string concatenation since base_url may or may not have trailing slash
+        let base = self.base_url.as_str().trim_end_matches('/');
+        let path = path.trim_start_matches('/');
+        format!("{base}/{path}")
+    }
+
+    /// Get a reference to the HTTP config.
+    pub fn http_config(&self) -> &HttpConfigSchema {
+        &self.http_config
+    }
+
+    /// Map a reqwest error to a ProviderError.
+    pub fn map_reqwest_error(e: &reqwest::Error) -> ProviderError {
+        if e.is_timeout() {
+            ProviderError::Timeout
+        } else if e.is_connect() {
+            ProviderError::ConnectionFailed(format!("Connection failed: {e}"))
+        } else {
+            ProviderError::RequestFailed {
+                status: 0,
+                message: e.to_string(),
+            }
+        }
+    }
+
+    /// Send a POST request with JSON body and return the parsed JSON response.
+    /// Includes exponential backoff retry on timeout and connection failures.
+    pub async fn post_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, ProviderError> {
+        let url = self.url(path);
+        let max_retries = self.http_config.max_retries;
+        let backoff_ms = self.http_config.retry_backoff_ms;
+
+        let mut last_error = None;
+
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                let delay = backoff_ms * 2u64.pow(attempt - 1);
+                debug!("Retrying request (attempt {}/{}) after {}ms", attempt + 1, max_retries + 1, delay);
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+            }
+
+            match self.client.post(&url).json(body).send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    if !status.is_success() {
+                        let error_text = response
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "Unknown error".to_string());
+                        // Don't retry on 4xx errors
+                        if status.is_client_error() {
+                            return Err(ProviderError::RequestFailed {
+                                status: status.as_u16(),
+                                message: error_text,
+                            });
+                        }
+                        // Retry on 5xx errors
+                        last_error = Some(ProviderError::RequestFailed {
+                            status: status.as_u16(),
+                            message: error_text,
+                        });
+                        continue;
+                    }
+                    return response.json().await.map_err(|e| {
+                        ProviderError::InvalidResponse(format!("Invalid JSON response: {e}"))
+                    });
+                }
+                Err(e) => {
+                    let provider_err = Self::map_reqwest_error(&e);
+                    match provider_err {
+                        ProviderError::Timeout | ProviderError::ConnectionFailed(_) => {
+                            error!("Request failed (attempt {}/{}): {}", attempt + 1, max_retries + 1, e);
+                            last_error = Some(provider_err);
+                            continue;
+                        }
+                        _ => return Err(provider_err),
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or(ProviderError::ConnectionFailed(
+            "All retry attempts exhausted".to_string(),
+        )))
+    }
+
+    /// Send a GET request and return the response.
+    pub async fn get(&self, path: &str) -> Result<reqwest::Response, ProviderError> {
+        let url = self.url(path);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| Self::map_reqwest_error(&e))?;
+        Ok(response)
+    }
+
+    /// Send a POST request for SSE streaming and return the raw response.
+    /// Does NOT retry - streaming requests should not be retried.
+    pub async fn post_stream(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let url = self.url(path);
+        let response = self
+            .client
+            .post(&url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| {
+                error!("Failed to send streaming request: {}", e);
+                Self::map_reqwest_error(&e)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(ProviderError::RequestFailed {
+                status: status.as_u16(),
+                message: error_text,
+            });
+        }
+
+        Ok(response)
+    }
+}
 
 // ===== Internal Service Models =====
 
@@ -51,7 +239,7 @@ pub struct InferenceResponse {
     // Core response fields
     pub text: String,
     pub model_used: String,
-    pub finish_reason: Option<String>,
+    pub finish_reason: Option<FinishReason>,
 
     // Token usage information
     pub total_tokens: Option<u32>,
@@ -128,19 +316,43 @@ impl fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
+/// Type alias for the stream type returned by providers
+pub type ProviderStream =
+    Pin<Box<dyn futures_util::Stream<Item = Result<crate::models::StreamChunk, ProviderError>> + Send>>;
+
 /// Common trait that all inference providers must implement
-#[async_trait]
 pub trait InferenceProvider: Send + Sync {
     /// Transform OpenAI-format request to our internal normalized format
     fn build_inference_request(
         &self,
         request: &CompletionRequest,
         model: &str, // Model already determined by validation layer
-    ) -> Result<InferenceRequest, ProviderError>;
+    ) -> Result<InferenceRequest, ProviderError> {
+        Ok(InferenceRequest {
+            messages: request.messages.clone(),
+            model: model.to_string(),
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+            top_p: request.top_p,
+            frequency_penalty: request.frequency_penalty,
+            presence_penalty: request.presence_penalty,
+            stop_sequences: normalize_stop_sequences(&request.stop),
+            seed: request.seed,
+            stream: request.stream,
+            n: request.n,
+            logprobs: request.logprobs,
+            top_logprobs: request.top_logprobs,
+            user: request.user.clone(),
+            response_format: request.response_format.clone(),
+            logit_bias: request.logit_bias.clone(),
+        })
+    }
 
     /// Execute the inference request against the provider
-    async fn execute(&self, request: &InferenceRequest)
-    -> Result<InferenceResponse, ProviderError>;
+    fn execute(
+        &self,
+        request: &InferenceRequest,
+    ) -> BoxFuture<'_, Result<InferenceResponse, ProviderError>>;
 
     /// Transform our internal response format to OpenAI-compatible format
     fn build_completion_response(
@@ -150,33 +362,30 @@ pub trait InferenceProvider: Send + Sync {
     ) -> CompletionResponse;
 
     /// High-level method that orchestrates the full flow
-    async fn generate(
+    fn generate(
         &self,
         request: &CompletionRequest,
         model: &str,
-    ) -> Result<CompletionResponse, ProviderError> {
-        let inference_req = self.build_inference_request(request, model)?;
-        let inference_resp = self.execute(&inference_req).await?;
-        Ok(self.build_completion_response(&inference_resp, request))
+    ) -> BoxFuture<'_, Result<CompletionResponse, ProviderError>> {
+        let inference_req = match self.build_inference_request(request, model) {
+            Ok(req) => req,
+            Err(e) => return Box::pin(async move { Err(e) }),
+        };
+        let request_clone = request.clone();
+        Box::pin(async move {
+            let inference_resp = self.execute(&inference_req).await?;
+            Ok(self.build_completion_response(&inference_resp, &request_clone))
+        })
     }
 
     /// Stream completion tokens as they're generated
-    /// Default implementation converts non-streaming response to chunked stream
-    async fn stream(
+    /// Default implementation returns streaming not supported
+    fn stream(
         &self,
         _request: &CompletionRequest,
         _model: &str,
-    ) -> Result<
-        std::pin::Pin<
-            Box<
-                dyn futures_util::Stream<Item = Result<crate::models::StreamChunk, ProviderError>>
-                    + Send,
-            >,
-        >,
-        ProviderError,
-    > {
-        // Default: not supported
-        Err(ProviderError::StreamingNotSupported)
+    ) -> BoxFuture<'_, Result<ProviderStream, ProviderError>> {
+        Box::pin(async { Err(ProviderError::StreamingNotSupported) })
     }
 
     /// Get the name of this provider (for logging/metrics)
@@ -239,15 +448,17 @@ pub trait InferenceProvider: Send + Sync {
     }
 
     /// Optional: List available models
-    async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
-        Err(ProviderError::Configuration(
-            "Model listing not supported".into(),
-        ))
+    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, ProviderError>> {
+        Box::pin(async {
+            Err(ProviderError::Configuration(
+                "Model listing not supported".into(),
+            ))
+        })
     }
 
     /// Optional: Check if the provider is healthy/reachable
-    async fn health_check(&self) -> Result<(), ProviderError> {
-        Ok(())
+    fn health_check(&self) -> BoxFuture<'_, Result<(), ProviderError>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -262,7 +473,7 @@ pub fn standard_completion_response(
     provider_name: &str,
 ) -> CompletionResponse {
     // Build the message with optional fields
-    let mut message = Message::new("assistant", &response.text);
+    let mut message = Message::new(Role::Assistant, &response.text);
 
     // Add tool calls if present
     if let Some(ref tool_calls) = response.tool_calls {
@@ -349,7 +560,7 @@ pub fn tokenize_for_streaming(text: &str) -> Vec<String> {
 }
 
 /// Create a properly formatted first chunk
-pub fn create_first_chunk(id: &str, model: &str, role: &str) -> crate::models::StreamChunk {
+pub fn create_first_chunk(id: &str, model: &str, role: Role) -> crate::models::StreamChunk {
     crate::models::StreamChunk {
         id: id.to_string(),
         object: "chat.completion.chunk".to_string(),
@@ -361,7 +572,7 @@ pub fn create_first_chunk(id: &str, model: &str, role: &str) -> crate::models::S
         choices: vec![crate::models::StreamChoice {
             index: 0,
             delta: crate::models::Delta {
-                role: Some(role.to_string()),
+                role: Some(role),
                 content: None,
                 tool_calls: None,
                 refusal: None,
@@ -404,7 +615,7 @@ pub fn create_content_chunk(id: &str, model: &str, content: &str) -> crate::mode
 pub fn create_final_chunk(
     id: &str,
     model: &str,
-    finish_reason: &str,
+    finish_reason: FinishReason,
     usage: Option<crate::models::Usage>,
 ) -> crate::models::StreamChunk {
     crate::models::StreamChunk {
@@ -418,7 +629,7 @@ pub fn create_final_chunk(
         choices: vec![crate::models::StreamChoice {
             index: 0,
             delta: crate::models::Delta::default(),
-            finish_reason: Some(finish_reason.to_string()),
+            finish_reason: Some(finish_reason),
             logprobs: None,
         }],
         system_fingerprint: None,

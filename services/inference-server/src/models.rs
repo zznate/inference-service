@@ -3,6 +3,62 @@ use std::collections::HashMap;
 
 // ===== API-Facing Models (Full OpenAI Compatibility) =====
 
+/// Message role types matching OpenAI API
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+    Function,
+}
+
+impl Role {
+    #[allow(dead_code)] // Useful API for consumers/future Candle provider
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+            Role::Function => "function",
+        }
+    }
+}
+
+/// Finish reason types matching OpenAI API
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    Stop,
+    Length,
+    ToolCalls,
+    ContentFilter,
+    FunctionCall,
+}
+
+impl FinishReason {
+    #[allow(dead_code)] // Useful API for consumers/future Candle provider
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FinishReason::Stop => "stop",
+            FinishReason::Length => "length",
+            FinishReason::ToolCalls => "tool_calls",
+            FinishReason::ContentFilter => "content_filter",
+            FinishReason::FunctionCall => "function_call",
+        }
+    }
+}
+
+/// Response format type matching OpenAI API
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FormatType {
+    Text,
+    JsonObject,
+}
+
 /// Response mode determines whether provider-specific extensions are included in responses
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -23,7 +79,7 @@ pub struct ProviderExtensions {
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Message {
-    pub role: String,
+    pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>, // Can be null when using tools/functions
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -119,7 +175,7 @@ pub struct CompletionRequest {
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct ResponseFormat {
     #[serde(rename = "type")]
-    pub format_type: String, // "text" or "json_object"
+    pub format_type: FormatType,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -194,7 +250,7 @@ pub struct Choice {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta: Option<Message>, // For streaming
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub finish_reason: Option<String>, // "stop", "length", "tool_calls", "content_filter", "function_call"
+    pub finish_reason: Option<FinishReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<LogProbs>,
 }
@@ -253,7 +309,7 @@ pub struct StreamChoice {
     pub index: u32,
     pub delta: Delta, // Note: delta, not message for streaming
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub finish_reason: Option<String>,
+    pub finish_reason: Option<FinishReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<LogProbs>,
 }
@@ -261,7 +317,7 @@ pub struct StreamChoice {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct Delta {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>, // Only in first chunk
+    pub role: Option<Role>, // Only in first chunk
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>, // Token content
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,7 +367,7 @@ pub struct OpenAIError {
 impl Default for Message {
     fn default() -> Self {
         Self {
-            role: "assistant".to_string(),
+            role: Role::Assistant,
             content: Some(String::new()),
             name: None,
             tool_calls: None,
@@ -324,9 +380,9 @@ impl Default for Message {
 
 impl Message {
     /// Create a simple text message
-    pub fn new(role: &str, content: &str) -> Self {
+    pub fn new(role: Role, content: &str) -> Self {
         Self {
-            role: role.to_string(),
+            role,
             content: Some(content.to_string()),
             ..Default::default()
         }
@@ -336,7 +392,7 @@ impl Message {
     #[allow(dead_code)] // TODO: Will be used when tool calling is implemented
     pub fn tool_response(tool_call_id: &str, content: &str) -> Self {
         Self {
-            role: "tool".to_string(),
+            role: Role::Tool,
             content: Some(content.to_string()),
             tool_call_id: Some(tool_call_id.to_string()),
             ..Default::default()
@@ -347,12 +403,12 @@ impl Message {
 impl Choice {
     /// Create a simple non-streaming choice
     #[allow(dead_code)] // Helper function for tests and examples
-    pub fn simple(content: &str, finish_reason: &str) -> Self {
+    pub fn simple(content: &str, finish_reason: FinishReason) -> Self {
         Self {
             index: 0,
-            message: Some(Message::new("assistant", content)),
+            message: Some(Message::new(Role::Assistant, content)),
             delta: None,
-            finish_reason: Some(finish_reason.to_string()),
+            finish_reason: Some(finish_reason),
             logprobs: None,
         }
     }

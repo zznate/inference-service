@@ -1,18 +1,15 @@
 use super::{
-    InferenceProvider, InferenceRequest, InferenceResponse, ProviderError,
-    standard_completion_response,
+    BoxFuture, HttpProviderClient, InferenceProvider, InferenceRequest, InferenceResponse,
+    ProviderError, ProviderStream, standard_completion_response,
 };
 use crate::config::{HttpConfigSchema, Settings};
 use crate::models::{CompletionRequest, CompletionResponse, StreamChunk};
-use async_trait::async_trait;
-use futures_util::{Stream, TryStreamExt};
-use reqwest;
+use futures_util::TryStreamExt;
 use serde::Deserialize;
 use serde_json;
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
-use tracing::{debug, error, instrument};
+use tracing::{debug, error};
 
 /// LM Studio supported extension parameters
 /// These are parameters beyond the standard OpenAI spec that LM Studio supports
@@ -32,8 +29,7 @@ const LM_STUDIO_EXTENSIONS: &[&str] = &[
 ];
 
 pub struct LMStudioProvider {
-    client: reqwest::Client,
-    settings: Arc<Settings>,
+    http: HttpProviderClient,
 }
 
 impl LMStudioProvider {
@@ -228,30 +224,13 @@ impl LMStudioProvider {
     }
 
     pub fn new(settings: Arc<Settings>) -> Result<Self, ProviderError> {
-        // Build HTTP client with config (use defaults if not provided)
-        let http_config = settings.inference.http.as_ref().cloned().unwrap_or({
-            // Provide sane defaults for development/testing
-            HttpConfigSchema {
-                timeout_secs: 30,
-                connect_timeout_secs: 10,
-                max_retries: 3,
-                retry_backoff_ms: 100,
-                keep_alive_secs: Some(30),
-                max_idle_connections: Some(10),
-            }
-        });
+        let http = HttpProviderClient::new(
+            &settings.inference.base_url,
+            settings.inference.http.as_ref(),
+            None,
+        )?;
 
-        let client = reqwest::Client::builder()
-            .timeout(http_config.timeout())
-            .connect_timeout(http_config.connect_timeout())
-            .pool_idle_timeout(http_config.keep_alive())
-            .pool_max_idle_per_host(http_config.max_idle_connections.unwrap_or(10))
-            .build()
-            .map_err(|e| {
-                ProviderError::Configuration(format!("Failed to build HTTP client: {e}"))
-            })?;
-
-        Ok(Self { client, settings })
+        Ok(Self { http })
     }
 
     /// Build request body for LM Studio (OpenAI-compatible format)
@@ -408,101 +387,20 @@ impl LMStudioProvider {
     }
 }
 
-#[async_trait]
 impl InferenceProvider for LMStudioProvider {
-    #[instrument(skip(self, request), fields(
-        provider = "lmstudio",
-        model = %request.model.as_deref().unwrap_or("none"),
-    ))]
-    fn build_inference_request(
-        &self,
-        request: &CompletionRequest,
-        model: &str,
-    ) -> Result<InferenceRequest, ProviderError> {
-        // Transform OpenAI format to our internal format
-        Ok(InferenceRequest {
-            messages: request.messages.clone(),
-            model: model.to_string(),
-            max_tokens: request.max_tokens,
-            temperature: request.temperature,
-            top_p: request.top_p,
-            frequency_penalty: request.frequency_penalty,
-            presence_penalty: request.presence_penalty,
-            stop_sequences: super::normalize_stop_sequences(&request.stop),
-            seed: request.seed,
-            stream: request.stream,
-            n: request.n,
-            logprobs: request.logprobs,
-            top_logprobs: request.top_logprobs,
-            user: request.user.clone(),
-            response_format: request.response_format.clone(),
-            logit_bias: request.logit_bias.clone(),
-        })
-    }
-
-    #[instrument(skip(self, request), fields(
-        provider = "lmstudio",
-        model = %request.model,
-        message_count = request.messages.len(),
-    ))]
-    async fn execute(
+    fn execute(
         &self,
         request: &InferenceRequest,
-    ) -> Result<InferenceResponse, ProviderError> {
-        // Build request body using OpenAI format (since LM Studio is OpenAI-compatible)
-        // Note: execute doesn't have access to extensions, use generate() instead
+    ) -> BoxFuture<'_, Result<InferenceResponse, ProviderError>> {
         let request_body = self.build_request_body(request, None);
+        let model = request.model.clone();
 
-        debug!("Sending request to LM Studio: {}", request_body);
-
-        // Execute HTTP request
-        let response = self
-            .client
-            .post(format!(
-                "{}/v1/chat/completions",
-                self.settings.inference.base_url
-            ))
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| {
-                error!("Failed to send request to LM Studio: {}", e);
-                if e.is_timeout() {
-                    ProviderError::Timeout
-                } else if e.is_connect() {
-                    ProviderError::ConnectionFailed(format!("Connection failed: {e}"))
-                } else {
-                    ProviderError::RequestFailed {
-                        status: 0,
-                        message: e.to_string(),
-                    }
-                }
-            })?;
-
-        // Check HTTP status
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            error!("LM Studio returned error status {}: {}", status, error_text);
-            return Err(ProviderError::RequestFailed {
-                status: status.as_u16(),
-                message: format!("LM Studio error: {error_text}"),
-            });
-        }
-
-        // Parse response as JSON
-        let response_body: serde_json::Value = response.json().await.map_err(|e| {
-            error!("Failed to parse LM Studio response: {}", e);
-            ProviderError::InvalidResponse(format!("Invalid JSON response: {e}"))
-        })?;
-
-        debug!("LM Studio response: {}", response_body);
-
-        // Parse into our internal format
-        self.parse_response_body(response_body, &request.model)
+        Box::pin(async move {
+            debug!("Sending request to LM Studio: {}", request_body);
+            let response_body = self.http.post_json("v1/chat/completions", &request_body).await?;
+            debug!("LM Studio response: {}", response_body);
+            self.parse_response_body(response_body, &model)
+        })
     }
 
     fn build_completion_response(
@@ -510,7 +408,6 @@ impl InferenceProvider for LMStudioProvider {
         response: &InferenceResponse,
         original_request: &CompletionRequest,
     ) -> CompletionResponse {
-        // Use the standard helper function
         standard_completion_response(response, original_request, self.name())
     }
 
@@ -519,85 +416,56 @@ impl InferenceProvider for LMStudioProvider {
     }
 
     fn http_config(&self) -> Option<&HttpConfigSchema> {
-        self.settings.inference.http.as_ref()
+        Some(self.http.http_config())
     }
 
-    async fn health_check(&self) -> Result<(), ProviderError> {
-        // Try to get models list as a health check
-        let response = self
-            .client
-            .get(format!("{}/v1/models", self.settings.inference.base_url))
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    ProviderError::Timeout
-                } else if e.is_connect() {
-                    ProviderError::ConnectionFailed(format!("Health check failed: {e}"))
-                } else {
-                    ProviderError::RequestFailed {
-                        status: 0,
-                        message: format!("Health check failed: {e}"),
-                    }
-                }
+    fn health_check(&self) -> BoxFuture<'_, Result<(), ProviderError>> {
+        Box::pin(async move {
+            let response = self.http.get("v1/models").await?;
+            if response.status().is_success() {
+                Ok(())
+            } else {
+                Err(ProviderError::RequestFailed {
+                    status: response.status().as_u16(),
+                    message: "Health check failed".to_string(),
+                })
+            }
+        })
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, Result<Vec<String>, ProviderError>> {
+        Box::pin(async move {
+            #[derive(Deserialize)]
+            struct ModelsResponse {
+                data: Vec<ModelInfo>,
+            }
+            #[derive(Deserialize)]
+            struct ModelInfo {
+                id: String,
+            }
+
+            let response = self.http.get("v1/models").await?;
+            if !response.status().is_success() {
+                return Err(ProviderError::RequestFailed {
+                    status: response.status().as_u16(),
+                    message: "Failed to list models".to_string(),
+                });
+            }
+            let models_response: ModelsResponse = response.json().await.map_err(|e| {
+                ProviderError::InvalidResponse(format!("Invalid models response: {e}"))
             })?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(ProviderError::RequestFailed {
-                status: response.status().as_u16(),
-                message: "Health check failed".to_string(),
-            })
-        }
+            Ok(models_response.data.into_iter().map(|m| m.id).collect())
+        })
     }
 
-    async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
-        #[derive(Deserialize)]
-        struct ModelsResponse {
-            data: Vec<ModelInfo>,
-        }
-
-        #[derive(Deserialize)]
-        struct ModelInfo {
-            id: String,
-        }
-
-        let response = self
-            .client
-            .get(format!("{}/v1/models", self.settings.inference.base_url))
-            .send()
-            .await
-            .map_err(|e| ProviderError::ConnectionFailed(format!("Failed to list models: {e}")))?;
-
-        if !response.status().is_success() {
-            return Err(ProviderError::RequestFailed {
-                status: response.status().as_u16(),
-                message: "Failed to list models".to_string(),
-            });
-        }
-
-        let models_response: ModelsResponse = response
-            .json()
-            .await
-            .map_err(|e| ProviderError::InvalidResponse(format!("Invalid models response: {e}")))?;
-
-        Ok(models_response.data.into_iter().map(|m| m.id).collect())
-    }
-
-    // ===== Streaming Support =====
-
-    /// LM Studio supports streaming since it's OpenAI-compatible
     fn supports_streaming(&self) -> bool {
         true
     }
 
-    /// Get list of supported LM Studio extension parameters
     fn supported_extensions(&self) -> Vec<&'static str> {
         LM_STUDIO_EXTENSIONS.to_vec()
     }
 
-    /// Validate LM Studio-specific extension parameters
     fn validate_extensions(
         &self,
         extensions: &HashMap<String, serde_json::Value>,
@@ -605,196 +473,105 @@ impl InferenceProvider for LMStudioProvider {
         Self::validate_lm_studio_extensions(extensions)
     }
 
-    /// Override generate to handle extensions properly
-    async fn generate(
+    fn generate(
         &self,
         request: &CompletionRequest,
         model: &str,
-    ) -> Result<CompletionResponse, ProviderError> {
-        // Validate and extract extensions
-        let extensions_ref = if let Some(ref exts) = request.extensions {
-            self.validate_extensions(exts)?;
-            Some(exts)
+    ) -> BoxFuture<'_, Result<CompletionResponse, ProviderError>> {
+        let extensions_validated = if let Some(ref exts) = request.extensions {
+            match self.validate_extensions(exts) {
+                Ok(()) => Some(exts.clone()),
+                Err(e) => return Box::pin(async move { Err(e) }),
+            }
         } else {
             None
         };
 
-        // Build inference request
-        let inference_req = self.build_inference_request(request, model)?;
+        let inference_req = match self.build_inference_request(request, model) {
+            Ok(req) => req,
+            Err(e) => return Box::pin(async move { Err(e) }),
+        };
 
-        // Build request body with extensions
-        let request_body = self.build_request_body(&inference_req, extensions_ref);
+        let request_body = self.build_request_body(&inference_req, extensions_validated.as_ref());
+        let model = model.to_string();
+        let request_clone = request.clone();
 
-        debug!("Sending request to LM Studio: {}", request_body);
+        Box::pin(async move {
+            debug!("Sending request to LM Studio: {}", request_body);
+            let response_body = self.http.post_json("v1/chat/completions", &request_body).await?;
+            debug!("LM Studio response: {}", response_body);
 
-        // Execute HTTP request
-        let response = self
-            .client
-            .post(format!(
-                "{}/v1/chat/completions",
-                self.settings.inference.base_url
-            ))
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| {
-                error!("Failed to send request to LM Studio: {}", e);
-                if e.is_timeout() {
-                    ProviderError::Timeout
-                } else if e.is_connect() {
-                    ProviderError::ConnectionFailed(format!("Connection failed: {e}"))
-                } else {
-                    ProviderError::RequestFailed {
-                        status: 0,
-                        message: e.to_string(),
-                    }
-                }
-            })?;
+            // Parse as full CompletionResponse (handles all n choices)
+            if let Ok(completion_response) =
+                serde_json::from_value::<CompletionResponse>(response_body.clone())
+            {
+                debug!(
+                    "LM Studio request completed with {} choices",
+                    completion_response.choices.len()
+                );
+                return Ok(completion_response);
+            }
 
-        // Check HTTP status
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            error!("LM Studio returned error status {}: {}", status, error_text);
-            return Err(ProviderError::RequestFailed {
-                status: status.as_u16(),
-                message: format!("LM Studio error: {error_text}"),
-            });
-        }
-
-        // Parse response as JSON
-        let response_body: serde_json::Value = response.json().await.map_err(|e| {
-            error!("Failed to parse LM Studio response: {}", e);
-            ProviderError::InvalidResponse(format!("Invalid JSON response: {e}"))
-        })?;
-
-        debug!("LM Studio response: {}", response_body);
-
-        // Parse as full CompletionResponse (handles all n choices)
-        if let Ok(completion_response) =
-            serde_json::from_value::<CompletionResponse>(response_body.clone())
-        {
-            debug!("LM Studio request completed with {} choices", completion_response.choices.len());
-            return Ok(completion_response);
-        }
-
-        // If parsing as CompletionResponse fails, try as error or use parse_response_body for single choice
-        let inference_resp = self.parse_response_body(response_body, model)?;
-        Ok(self.build_completion_response(&inference_resp, request))
+            // Fallback: parse as single-choice response
+            let inference_resp = self.parse_response_body(response_body, &model)?;
+            Ok(self.build_completion_response(&inference_resp, &request_clone))
+        })
     }
 
-    /// Stream completion using LM Studio's SSE API (OpenAI-compatible)
-    async fn stream(
+    fn stream(
         &self,
         request: &CompletionRequest,
         model: &str,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk, ProviderError>> + Send>>, ProviderError>
-    {
-        use eventsource_stream::Eventsource;
-        use futures_util::stream::StreamExt;
-
-        // Validate and extract extensions
-        let extensions_ref = if let Some(ref exts) = request.extensions {
-            self.validate_extensions(exts)?;
-            Some(exts)
+    ) -> BoxFuture<'_, Result<ProviderStream, ProviderError>> {
+        let extensions_validated = if let Some(ref exts) = request.extensions {
+            match self.validate_extensions(exts) {
+                Ok(()) => Some(exts.clone()),
+                Err(e) => return Box::pin(async move { Err(e) }),
+            }
         } else {
             None
         };
 
-        // Build inference request
-        let inference_req = self.build_inference_request(request, model)?;
-        let mut request_body = self.build_request_body(&inference_req, extensions_ref);
+        let inference_req = match self.build_inference_request(request, model) {
+            Ok(req) => req,
+            Err(e) => return Box::pin(async move { Err(e) }),
+        };
 
-        // Enable streaming
+        let mut request_body =
+            self.build_request_body(&inference_req, extensions_validated.as_ref());
         request_body["stream"] = serde_json::json!(true);
 
-        debug!("Sending streaming request to LM Studio: {}", request_body);
+        Box::pin(async move {
+            use eventsource_stream::Eventsource;
+            use futures_util::stream::StreamExt;
 
-        // Make streaming HTTP request
-        let response = self
-            .client
-            .post(format!(
-                "{}/v1/chat/completions",
-                self.settings.inference.base_url
-            ))
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| {
-                error!("Failed to send streaming request to LM Studio: {}", e);
-                if e.is_timeout() {
-                    ProviderError::Timeout
-                } else if e.is_connect() {
-                    ProviderError::ConnectionFailed(format!("Connection failed: {e}"))
-                } else {
-                    ProviderError::RequestFailed {
-                        status: 0,
-                        message: e.to_string(),
-                    }
-                }
-            })?;
+            debug!("Sending streaming request to LM Studio: {}", request_body);
+            let response = self.http.post_stream("v1/chat/completions", &request_body).await?;
 
-        // Check HTTP status before processing stream
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            error!("LM Studio returned error status {}: {}", status, error_text);
-            return Err(ProviderError::RequestFailed {
-                status: status.as_u16(),
-                message: format!("LM Studio streaming error: {error_text}"),
-            });
-        }
-
-        // Convert response to byte stream
-        let bytes_stream = response
-            .bytes_stream()
-            .map_err(std::io::Error::other);
-
-        // Parse SSE events from LM Studio using correct API
-        let sse_stream = bytes_stream
-            .eventsource()
-            .filter_map(|event_result| async move {
-                match event_result {
-                    Ok(event) => {
-                        let data = &event.data;
-                        debug!("Received SSE event type: {:?}, data: {}", event.event, data);
-
-                        if data == "[DONE]" {
-                            debug!("LM Studio stream completed with [DONE] marker");
-                            None // End of stream marker
-                        } else {
-                            // Parse streaming chunk
-                            match serde_json::from_str::<StreamChunk>(data) {
-                                Ok(chunk) => {
-                                    debug!("Received LM Studio stream chunk: {:?}", chunk);
-                                    Some(Ok(chunk))
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "Failed to parse LM Studio stream chunk: {} - Data: {}",
-                                        e, data
-                                    );
-                                    Some(Err(ProviderError::StreamError(format!(
+            let bytes_stream = response.bytes_stream().map_err(std::io::Error::other);
+            let sse_stream = bytes_stream
+                .eventsource()
+                .filter_map(|event_result| async move {
+                    match event_result {
+                        Ok(event) => {
+                            let data = &event.data;
+                            if data == "[DONE]" {
+                                None
+                            } else {
+                                match serde_json::from_str::<StreamChunk>(data) {
+                                    Ok(chunk) => Some(Ok(chunk)),
+                                    Err(e) => Some(Err(ProviderError::StreamError(format!(
                                         "Invalid stream chunk: {e}"
-                                    ))))
+                                    )))),
                                 }
                             }
                         }
+                        Err(e) => Some(Err(ProviderError::StreamError(format!("SSE error: {e}")))),
                     }
-                    Err(e) => {
-                        error!("SSE parsing error: {}", e);
-                        Some(Err(ProviderError::StreamError(format!("SSE error: {e}"))))
-                    }
-                }
-            });
+                });
 
-        Ok(Box::pin(sse_stream))
+            Ok(Box::pin(sse_stream) as ProviderStream)
+        })
     }
 }
 
@@ -802,7 +579,7 @@ impl InferenceProvider for LMStudioProvider {
 mod tests {
     use super::*;
     use crate::config::{InferenceConfig, LogFormat, LogOutput, LoggingConfig, ServerConfig};
-    use crate::models::Message;
+    use crate::models::{FinishReason, Message, Role};
 
     fn create_test_settings() -> Arc<Settings> {
         Arc::new(Settings {
@@ -832,7 +609,7 @@ mod tests {
         let provider = LMStudioProvider::new(create_test_settings()).unwrap();
 
         let completion_req = CompletionRequest {
-            messages: vec![Message::new("user", "Hello")],
+            messages: vec![Message::new(Role::User, "Hello")],
             model: Some("gpt-4".to_string()),
             max_tokens: Some(100),
             temperature: Some(0.7),
@@ -885,7 +662,7 @@ mod tests {
         assert_eq!(inference_resp.total_tokens, Some(15));
         assert_eq!(inference_resp.prompt_tokens, Some(10));
         assert_eq!(inference_resp.completion_tokens, Some(5));
-        assert_eq!(inference_resp.finish_reason, Some("stop".to_string()));
+        assert_eq!(inference_resp.finish_reason, Some(FinishReason::Stop));
     }
 
     #[test]
@@ -937,7 +714,7 @@ mod tests {
             total_tokens: Some(15),
             prompt_tokens: Some(10),
             completion_tokens: Some(5),
-            finish_reason: Some("stop".to_string()),
+            finish_reason: Some(FinishReason::Stop),
             latency_ms: None,
             provider_request_id: None,
             system_fingerprint: None,
@@ -977,8 +754,8 @@ mod tests {
             15
         );
         assert_eq!(
-            completion_resp.choices[0].finish_reason.as_ref().unwrap(),
-            "stop"
+            completion_resp.choices[0].finish_reason,
+            Some(FinishReason::Stop)
         );
     }
 }
